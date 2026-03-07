@@ -33,6 +33,7 @@ POC completion is defined explicitly by one end-to-end demo only:
 - Expected output: `test-value-123`
 
 If that exact demo does not work reliably, the POC is not complete, even if tests are green.
+The current repository has achieved that POC bar and should now be treated as post-POC work moving toward Phase 1.
 
 Current completed modules in code:
 
@@ -40,6 +41,7 @@ Current completed modules in code:
 - `src/vault_file.rs` - done
 - `src/daemon.rs` - POC done
 - `src/run_cmd.rs` - POC done
+- `src/main.rs` - POC CLI dispatch done
 
 Current next module from `docs/MODULE_MAP.md`:
 

@@ -84,6 +84,7 @@ Offset  Size  Field
 **POC completion definition:**
 - The POC is complete only when `lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"` prints `test-value-123`
 - Passing tests or partially implemented modules do not count on their own
+- Current status: achieved
 
 ### POC scope (build now):
 | Function | Description | Status |
@@ -97,6 +98,7 @@ Offset  Size  Field
 - Accepts one JSON request with type `get_secret`
 - Returns hardcoded JSON `{"value":"test-value-123"}`
 - Cleans up the socket file after the one-shot POC server exits
+- Works end-to-end with `lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"`
 
 ### Phase 1 scope (build later):
 | Function | Description | Status |
@@ -156,6 +158,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Spawns a child process with `OPENAI_KEY=test-value-123` injected
 - Returns the child process exit status
 - Verified with a Python child-process test
+- Verified by the real CLI demo command that prints `test-value-123`
 
 **Two-phase token registration (critical — do not simplify):**
 ```

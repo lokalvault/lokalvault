@@ -16,14 +16,26 @@ Your code gets its secrets. Your AI agent never does.
 ## Status
 
 🚧 **This repository is under active development.**
-The POC is not ready for use. Do not use this to store real secrets yet.
+The POC is complete. Do not use this to store real secrets yet.
 
-Current phase: **Proof of Concept**
+Current phase: **POC complete, moving toward Phase 1**
 - [x] Core crypto (AES-256-GCM + Argon2id)
 - [x] Vault file read/write
 - [x] Daemon + Unix socket
 - [x] Process spawn + env injection
-- [~] SO_PEERCRED / peer credential verification
+- [x] Peer credential verification for the POC demo path
+
+POC completion demo:
+
+```bash
+lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"
+```
+
+Expected output:
+
+```text
+test-value-123
+```
 
 ---
 
@@ -86,6 +98,12 @@ This POC validates five things before building the full product:
 4. **Process spawn + env injection** — child process receives secrets as env vars
 5. **Peer credentials** — daemon verifies kernel-provided peer credentials and applies current POC request checks
 
+POC result achieved today:
+
+- `lokalvault daemon-poc` starts the one-shot daemon on `/tmp/lokalvault-test.sock`
+- `lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"` prints `test-value-123`
+- The demo was run successfully three times in a row
+
 ---
 
 ## Stack
@@ -111,6 +129,10 @@ cargo test
 
 # Run full POC test suite
 cargo test
+
+# Run the completed POC demo
+cargo run -- daemon-poc &
+cargo run -- run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"
 ```
 
 ---
@@ -137,7 +159,7 @@ with elevated privileges or root-level attackers (same limitation as
 
 ## Roadmap
 
-- **POC** (current) — validate core crypto + daemon + process injection
+- **POC** (complete) — core crypto + daemon + process injection proven end-to-end
 - **v0.1** — working CLI, vault CRUD, Python + Node SDKs
 - **v0.2** — Tauri desktop app, PIN approval dialog, audit log
 - **v1.0** — macOS + Windows + Linux builds, .env import, push to Vercel/Render
@@ -152,7 +174,7 @@ Apache 2.0 — see [LICENSE](./LICENSE)
 
 ## Contributing
 
-Not accepting contributions during POC phase.
+Not accepting contributions during the post-POC transition.
 Watch this repo for the v0.1 announcement.
 
 ---
