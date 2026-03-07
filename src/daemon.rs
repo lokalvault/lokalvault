@@ -10,7 +10,27 @@ use tokio::net::{UnixListener, UnixStream};
 pub const POC_SOCKET_PATH: &str = "/tmp/lokalvault-test.sock";
 
 pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
-    let socket_path = PathBuf::from(POC_SOCKET_PATH);
+    create_socket_at_path(PathBuf::from(POC_SOCKET_PATH))
+}
+
+pub async fn run_daemon_poc() -> Result<(), String> {
+    run_daemon_poc_at_path(PathBuf::from(POC_SOCKET_PATH)).await
+}
+
+pub async fn run_daemon_poc_at_path(socket_path: PathBuf) -> Result<(), String> {
+    let (socket_path, listener) = create_socket_at_path(socket_path)?;
+
+    let result = async {
+        let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        handle_poc_connection(&mut stream).await
+    }
+    .await;
+
+    let cleanup_result = cleanup_socket_file(&socket_path);
+    result.and(cleanup_result)
+}
+
+pub fn create_socket_at_path(socket_path: PathBuf) -> Result<(PathBuf, UnixListener), String> {
     cleanup_socket_file(&socket_path)?;
 
     let listener = UnixListener::bind(&socket_path).map_err(|e| e.to_string())?;
@@ -21,17 +41,9 @@ pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
     Ok((socket_path, listener))
 }
 
-pub async fn run_daemon_poc() -> Result<(), String> {
-    let (socket_path, listener) = create_socket()?;
-
-    let result = async {
-        let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-        handle_poc_connection(&mut stream).await
-    }
-    .await;
-
-    let cleanup_result = cleanup_socket_file(&socket_path);
-    result.and(cleanup_result)
+pub fn unique_poc_socket_path(test_name: &str) -> PathBuf {
+    let pid = std::process::id();
+    PathBuf::from(format!("/tmp/lokalvault-{test_name}-{pid}.sock"))
 }
 
 async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
@@ -85,8 +97,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_socket_sets_permissions_to_0600() {
-        cleanup_socket_file(Path::new(POC_SOCKET_PATH)).unwrap();
-        let (socket_path, listener) = create_socket().unwrap();
+        let socket_path = unique_poc_socket_path("daemon-perms");
+        cleanup_socket_file(&socket_path).unwrap();
+        let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
 
         let mode = fs::metadata(&socket_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -97,18 +110,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_returns_hardcoded_json() {
-        cleanup_socket_file(Path::new(POC_SOCKET_PATH)).unwrap();
-        let daemon = tokio::spawn(async { run_daemon_poc().await });
+        let socket_path = unique_poc_socket_path("daemon-response");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
         for _ in 0..50 {
-            if Path::new(POC_SOCKET_PATH).exists() {
+            if Path::new(&socket_path_string).exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         let mut stream = loop {
-            match UnixStream::connect(POC_SOCKET_PATH).await {
+            match UnixStream::connect(&socket_path_string).await {
                 Ok(stream) => break stream,
                 Err(err) if err.kind() == ErrorKind::NotFound => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -128,6 +143,6 @@ mod tests {
 
         let daemon_result = daemon.await.unwrap();
         assert!(daemon_result.is_ok());
-        assert!(!Path::new(POC_SOCKET_PATH).exists());
+        assert!(!Path::new(&socket_path_string).exists());
     }
 }

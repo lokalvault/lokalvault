@@ -118,6 +118,9 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static VAULT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn cleanup() {
         let _ = fs::remove_file(get_vault_path());
@@ -126,6 +129,7 @@ mod tests {
 
     #[test]
     fn test_write_and_read_vault() {
+        let _guard = VAULT_TEST_LOCK.lock().unwrap();
         cleanup();
 
         let mut vault = VaultData::new();
@@ -158,6 +162,7 @@ mod tests {
 
     #[test]
     fn test_wrong_password_on_read() {
+        let _guard = VAULT_TEST_LOCK.lock().unwrap();
         cleanup();
 
         let vault = VaultData::new();
@@ -171,8 +176,8 @@ mod tests {
 
     #[test]
     fn test_magic_bytes_present() {
+        let _guard = VAULT_TEST_LOCK.lock().unwrap();
         cleanup();
-        std::thread::sleep(std::time::Duration::from_millis(10));
 
         write_vault(&VaultData::new(), "password").unwrap();
         let raw = fs::read(get_vault_path()).unwrap();

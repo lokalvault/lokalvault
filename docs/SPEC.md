@@ -1093,11 +1093,23 @@ If Phase 0 works in 2 weeks: proceed. If not: more Rust practice first.
   return hardcoded JSON {"OPENAI_KEY": "test-value-123"}
 - Verify 0600 permissions on socket
 
+Status in current repository snapshot:
+- Implemented as `src/daemon.rs`
+- Uses `/tmp/lokalvault-test.sock` for the POC path
+- Returns hardcoded JSON `{"value":"test-value-123"}`
+- Includes tests for `0600` permissions and one-shot request/response flow
+
 ### Day 8–9: Process Spawn + Env Injection
 - Write cmd_run: connect to socket → receive secret →
   spawn: `python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"`
   with OPENAI_KEY injected
 - Verify Python prints "test-value-123"
+
+Status in current repository snapshot:
+- Implemented as `src/run_cmd.rs`
+- Connects to the daemon POC socket and requests `OPENAI_KEY`
+- Spawns a child process with `OPENAI_KEY=test-value-123` injected into the env
+- Includes a test that verifies a Python subprocess exits successfully only when the env injection worked
 
 ### Day 10: SO_PEERCRED
 - Add get_peer_credentials to daemon

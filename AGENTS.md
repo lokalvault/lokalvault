@@ -31,13 +31,18 @@ Current completed modules in code:
 
 - `src/crypto.rs` - done
 - `src/vault_file.rs` - done
+- `src/daemon.rs` - POC done
+- `src/run_cmd.rs` - POC done
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/daemon.rs` - next POC target
+- `src/daemon.rs` - next POC target for SO_PEERCRED and credential checks
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
+
+After completing each module, update both `AGENTS.md` and the relevant files under `docs/` to reflect the new status, behavior, commands, or ownership changes introduced by that module.
+After those documentation updates, create proper git commits for the completed work and then respond to the user with what changed and the logical next instruction point.
 
 ## Source Of Truth For Ownership
 
@@ -135,8 +140,10 @@ The live codebase is smaller than the full spec.
 - `src/main.rs`: minimal binary entrypoint
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
+- `src/daemon.rs`: POC Unix socket server with hardcoded JSON response and permission tests
+- `src/run_cmd.rs`: POC process spawning with daemon request and env injection test
 
-Planned modules in docs such as `src/daemon.rs`, `src/run_cmd.rs`, `src/vault_ops.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
+Planned modules in docs such as `src/vault_ops.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
 ## Rust Style Guidelines
@@ -218,5 +225,8 @@ Infer style from the codebase, then let `rustfmt` finalize it.
 6. Run the most relevant exact test.
 7. Run `cargo test` if shared logic changed.
 8. Run Clippy for broader or security-sensitive changes.
+9. After a module is completed, update `AGENTS.md` and the relevant `docs/` files to reflect the new state.
+10. Create proper commits for the completed module and documentation updates.
+11. Reply to the user with what was finished and the next sensible instruction point.
 
 Following this file should keep agent work aligned with the latest docs while still respecting the repository's current POC reality.

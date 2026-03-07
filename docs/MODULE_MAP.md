@@ -84,8 +84,15 @@ Offset  Size  Field
 ### POC scope (build now):
 | Function | Description | Status |
 |---|---|---|
-| `run_daemon_poc` | Open socket, accept connection, return hardcoded JSON | 🔄 NEXT |
-| `create_socket` | Create /tmp/lokalvault-test.sock at 0600 | 🔄 NEXT |
+| `run_daemon_poc` | Open socket, accept connection, return hardcoded JSON | ✅ Done |
+| `create_socket` | Create /tmp/lokalvault-test.sock at 0600 | ✅ Done |
+
+**Current POC behavior implemented:**
+- Binds `/tmp/lokalvault-test.sock`
+- Sets socket permissions to `0600` immediately after bind
+- Accepts one JSON request with type `get_secret`
+- Returns hardcoded JSON `{"value":"test-value-123"}`
+- Cleans up the socket file after the one-shot POC server exits
 
 ### Phase 1 scope (build later):
 | Function | Description | Status |
@@ -119,12 +126,19 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 
 | Function | Description | Status |
 |---|---|---|
-| `cmd_run_poc` | Connect to socket → get secrets → spawn child with env injected | ⬜ Step 4 |
+| `cmd_run_poc` | Connect to socket → get secrets → spawn child with env injected | ✅ Done |
 | `cmd_run` | Full version with PIN, two-phase tokens, project config | ⬜ Phase 1 |
 | `show_pin_dialog` | Terminal: print code, read stdin. UI: emit event. | ⬜ Phase 1 |
 | `get_project_from_config` | Read .lokalvault in cwd | ⬜ Phase 1 |
 | `inject_secrets_into_env` | cmd.env(key, value) for each secret | ⬜ Phase 1 |
 | `fetch_all_secrets` | Request all secrets for project from daemon | ⬜ Phase 1 |
+
+**Current POC behavior implemented:**
+- Connects to the daemon POC socket
+- Requests the hardcoded `OPENAI_KEY` secret
+- Spawns a child process with `OPENAI_KEY=test-value-123` injected
+- Returns the child process exit status
+- Verified with a Python child-process test
 
 **Two-phase token registration (critical — do not simplify):**
 ```

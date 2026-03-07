@@ -1,5 +1,6 @@
 mod crypto;
 mod daemon;
+mod run_cmd;
 mod vault_file;
 
 fn main() {
