@@ -1120,6 +1120,7 @@ Status in current repository snapshot:
 - Linux path implemented in `src/daemon.rs` using `SO_PEERCRED`
 - macOS path now validates peer credentials with `getpeereid()` plus `LOCAL_PEERCRED`
 - Current macOS POC verifies UID successfully but still returns a placeholder PID value of `0`
+- The daemon POC now compares any client-reported `uid` field against kernel-provided peer credentials and rejects mismatches
 - Tests now cover credential retrieval progress alongside the earlier daemon socket POC
 
 **Phase 0 success = you have proven the entire architecture.**

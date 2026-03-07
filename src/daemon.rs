@@ -115,6 +115,9 @@ pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
 
 async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
     let request = read_json_request(stream).await?;
+    let (peer_pid, peer_uid) = get_peer_credentials(stream)?;
+
+    validate_poc_peer_credentials(&request, peer_pid, peer_uid)?;
 
     if request.get("type") != Some(&serde_json::Value::String("get_secret".to_string())) {
         return Err("unsupported request type".to_string());
@@ -126,6 +129,26 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     stream.shutdown().await.map_err(|e| e.to_string())
+}
+
+fn validate_poc_peer_credentials(
+    request: &serde_json::Value,
+    peer_pid: u32,
+    peer_uid: u32,
+) -> Result<(), String> {
+    if let Some(request_pid) = request.get("pid").and_then(serde_json::Value::as_u64) {
+        if request_pid as u32 != peer_pid {
+            return Err("client-reported pid mismatch".to_string());
+        }
+    }
+
+    if let Some(request_uid) = request.get("uid").and_then(serde_json::Value::as_u64) {
+        if request_uid as u32 != peer_uid {
+            return Err("client-reported uid mismatch".to_string());
+        }
+    }
+
+    Ok(())
 }
 
 async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value, String> {
@@ -244,7 +267,12 @@ mod tests {
                 Err(err) => panic!("failed to connect to daemon socket: {err}"),
             }
         };
-        let request = json!({ "type": "get_secret", "key": "OPENAI_KEY" }).to_string();
+        let request = json!({
+            "type": "get_secret",
+            "key": "OPENAI_KEY",
+            "uid": unsafe { libc::geteuid() }
+        })
+        .to_string();
         stream.write_all(request.as_bytes()).await.unwrap();
         stream.shutdown().await.unwrap();
 
@@ -256,6 +284,39 @@ mod tests {
 
         let daemon_result = daemon.await.unwrap();
         assert!(daemon_result.is_ok());
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_daemon_poc_rejects_client_reported_uid_mismatch() {
+        let socket_path = unique_poc_socket_path("daemon-bad-uid");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "get_secret",
+            "key": "OPENAI_KEY",
+            "uid": u64::from(unsafe { libc::geteuid() }) + 1
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(response.is_empty());
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "client-reported uid mismatch");
         assert!(!Path::new(&socket_path_string).exists());
     }
 }

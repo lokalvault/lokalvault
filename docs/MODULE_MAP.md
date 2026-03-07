@@ -124,6 +124,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - macOS: `getpeereid()` plus `LOCAL_PEERCRED` validation implemented for UID verification
 - Current macOS POC returns UID and a placeholder PID value of `0`; deeper PID retrieval remains a later daemon step
 - Tests cover Linux and macOS current-UID verification behavior
+- POC request handling now rejects client-reported `uid` values when they do not match kernel-provided peer credentials
 
 ---
 
