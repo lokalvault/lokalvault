@@ -52,6 +52,10 @@ async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     let response_json: Value = serde_json::from_slice(&response).map_err(|e| e.to_string())?;
+    if let Some(error) = response_json.get("error").and_then(Value::as_str) {
+        return Err(error.to_string());
+    }
+
     response_json
         .get("value")
         .and_then(Value::as_str)

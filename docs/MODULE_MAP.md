@@ -126,6 +126,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Tests cover Linux and macOS current-UID verification behavior
 - POC request handling now rejects client-reported `uid` values when they do not match kernel-provided peer credentials
 - `get_secret` requests in the current POC must include `uid`, and the daemon rejects the request if it is missing
+- POC rejection paths now return structured JSON errors like `{"error":"..."}` instead of silently closing with no response
 
 ---
 

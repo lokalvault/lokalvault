@@ -26,7 +26,8 @@ pub async fn run_daemon_poc_at_path(socket_path: PathBuf) -> Result<(), String> 
 
     let result = async {
         let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-        handle_poc_connection(&mut stream).await
+        handle_poc_connection(&mut stream).await?;
+        Ok(())
     }
     .await;
 
@@ -122,13 +123,27 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "missing request type".to_string())?;
 
-    validate_poc_peer_credentials(&request, request_type, peer_pid, peer_uid)?;
+    if let Err(error) = validate_poc_peer_credentials(&request, request_type, peer_pid, peer_uid) {
+        write_error_response(stream, &error).await?;
+        return Err(error);
+    }
 
     if request_type != "get_secret" {
-        return Err("unsupported request type".to_string());
+        let error = "unsupported request type".to_string();
+        write_error_response(stream, &error).await?;
+        return Err(error);
     }
 
     let response = json!({ "value": "test-value-123" }).to_string();
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.shutdown().await.map_err(|e| e.to_string())
+}
+
+async fn write_error_response(stream: &mut UnixStream, error: &str) -> Result<(), String> {
+    let response = json!({ "error": error }).to_string();
     stream
         .write_all(response.as_bytes())
         .await
@@ -323,7 +338,9 @@ mod tests {
 
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
-        assert!(response.is_empty());
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "client-reported uid mismatch");
 
         let daemon_result = daemon.await.unwrap();
         assert_eq!(daemon_result.unwrap_err(), "client-reported uid mismatch");
@@ -355,10 +372,46 @@ mod tests {
 
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
-        assert!(response.is_empty());
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "get_secret request missing uid");
 
         let daemon_result = daemon.await.unwrap();
         assert_eq!(daemon_result.unwrap_err(), "get_secret request missing uid");
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_daemon_poc_returns_structured_error_for_unsupported_request_type() {
+        let socket_path = unique_poc_socket_path("daemon-bad-type");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "ping",
+            "uid": unsafe { libc::geteuid() }
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "unsupported request type");
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "unsupported request type");
         assert!(!Path::new(&socket_path_string).exists());
     }
 }
