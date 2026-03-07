@@ -2,7 +2,11 @@ use serde_json::json;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
+#[cfg(target_os = "linux")]
+use std::mem;
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -44,6 +48,41 @@ pub fn create_socket_at_path(socket_path: PathBuf) -> Result<(PathBuf, UnixListe
 pub fn unique_poc_socket_path(test_name: &str) -> PathBuf {
     let pid = std::process::id();
     PathBuf::from(format!("/tmp/lokalvault-{test_name}-{pid}.sock"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
+    let fd = stream.as_raw_fd();
+    let mut credentials: libc::ucred = unsafe { mem::zeroed() };
+    let mut credentials_len = mem::size_of::<libc::ucred>() as libc::socklen_t;
+
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut credentials as *mut libc::ucred as *mut libc::c_void,
+            &mut credentials_len,
+        )
+    };
+
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    Ok((credentials.pid as u32, credentials.uid))
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
+    let _ = stream;
+    Err("macOS peer credential retrieval is not implemented yet; use LOCAL_PEERCRED in the next daemon step".to_string())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
+    let _ = stream;
+    Err("peer credential retrieval is not implemented on this platform".to_string())
 }
 
 async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
@@ -94,6 +133,52 @@ fn cleanup_socket_file(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_get_peer_credentials_returns_current_process_uid() {
+        let socket_path = unique_poc_socket_path("daemon-peercred");
+        cleanup_socket_file(&socket_path).unwrap();
+        let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            get_peer_credentials(&stream).unwrap()
+        });
+
+        let client = UnixStream::connect(&socket_path_string).await.unwrap();
+        let (peer_pid, peer_uid) = server.await.unwrap();
+
+        assert_eq!(peer_uid, unsafe { libc::geteuid() });
+        assert!(peer_pid > 0);
+
+        drop(client);
+        cleanup_socket_file(Path::new(&socket_path_string)).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_get_peer_credentials_reports_macos_placeholder_error() {
+        let socket_path = unique_poc_socket_path("daemon-peercred-macos");
+        cleanup_socket_file(&socket_path).unwrap();
+        let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            get_peer_credentials(&stream)
+        });
+
+        let client = UnixStream::connect(&socket_path_string).await.unwrap();
+        let result = server.await.unwrap();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("LOCAL_PEERCRED"));
+
+        drop(client);
+        cleanup_socket_file(Path::new(&socket_path_string)).unwrap();
+    }
 
     #[tokio::test]
     async fn test_create_socket_sets_permissions_to_0600() {

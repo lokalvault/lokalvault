@@ -100,7 +100,7 @@ Offset  Size  Field
 | `start_daemon` | Detached process, receives vault via startup pipe | ⬜ Phase 1 |
 | `stop_daemon` | Zeroize secrets → close socket → exit | ⬜ Phase 1 |
 | `handle_connection` | Route requests, verify credentials | ⬜ Phase 1 |
-| `get_peer_credentials` | SO_PEERCRED (Linux) / LOCAL_PEERCRED (macOS) | ⬜ Phase 1 |
+| `get_peer_credentials` | SO_PEERCRED (Linux) / LOCAL_PEERCRED (macOS) | 🔄 POC advanced |
 | `validate_token` | Constant-time compare + PID + UID check | ⬜ Phase 1 |
 | `register_token_phase1` | Store pending token with 1000ms window | ⬜ Phase 1 |
 | `register_token_phase2` | Bind token to PID after spawn | ⬜ Phase 1 |
@@ -118,6 +118,11 @@ Offset  Size  Field
 **CRITICAL platform note:**
 Linux uses `SO_PEERCRED`. macOS uses `LOCAL_PEERCRED`. These are different.
 Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
+
+**Current credential-check progress:**
+- Linux: `get_peer_credentials` implemented with `getsockopt(..., SO_PEERCRED, ...)`
+- macOS: explicit placeholder error documents that `LOCAL_PEERCRED` is the next required implementation
+- Tests cover the Linux current-UID case and the macOS placeholder behavior
 
 ---
 

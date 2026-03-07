@@ -1116,6 +1116,11 @@ Status in current repository snapshot:
 - Verify PID and UID are returned correctly
 - Test on Linux AND macOS (LOCAL_PEERCRED difference)
 
+Status in current repository snapshot:
+- Linux path implemented in `src/daemon.rs` using `SO_PEERCRED`
+- macOS path is not complete yet; code currently returns an explicit placeholder error pointing to `LOCAL_PEERCRED`
+- Tests now cover credential retrieval progress alongside the earlier daemon socket POC
+
 **Phase 0 success = you have proven the entire architecture.**
 
 ---
