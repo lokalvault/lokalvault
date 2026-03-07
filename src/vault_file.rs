@@ -1,7 +1,7 @@
 use crate::crypto::{decrypt, derive_key, encrypt, generate_nonce, generate_salt};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Binary file layout ──────────────────────────────────────────
 // Offset  Size  Field
@@ -52,7 +52,7 @@ pub fn get_vault_path() -> PathBuf {
     PathBuf::from("test_vault.lv")
 }
 
-fn get_temp_vault_path(path: &PathBuf) -> PathBuf {
+fn get_temp_vault_path(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
         .map(|name| name.to_os_string())
@@ -172,6 +172,7 @@ mod tests {
     #[test]
     fn test_magic_bytes_present() {
         cleanup();
+        std::thread::sleep(std::time::Duration::from_millis(10));
 
         write_vault(&VaultData::new(), "password").unwrap();
         let raw = fs::read(get_vault_path()).unwrap();

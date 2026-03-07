@@ -1,4 +1,5 @@
 mod crypto;
+mod daemon;
 mod vault_file;
 
 fn main() {
