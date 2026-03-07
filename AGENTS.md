@@ -27,6 +27,13 @@ If Cursor or Copilot instruction files are added later, treat them as additional
 
 The docs describe a larger Tauri + React + CLI product, but this repository is still in the early Rust POC stage.
 
+POC completion is defined explicitly by one end-to-end demo only:
+
+- `lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"`
+- Expected output: `test-value-123`
+
+If that exact demo does not work reliably, the POC is not complete, even if tests are green.
+
 Current completed modules in code:
 
 - `src/crypto.rs` - done

@@ -1,6 +1,5 @@
-use crate::daemon::{POC_SOCKET_PATH, run_daemon_poc_at_path, unique_poc_socket_path};
+use crate::daemon::POC_SOCKET_PATH;
 use serde_json::Value;
-use std::path::Path;
 use std::process::Command;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -67,6 +66,8 @@ async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::{run_daemon_poc_at_path, unique_poc_socket_path};
+    use std::path::Path;
 
     #[tokio::test]
     async fn test_cmd_run_poc_injects_openai_key_into_child() {

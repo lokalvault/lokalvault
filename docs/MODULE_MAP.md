@@ -81,6 +81,10 @@ Offset  Size  Field
 ## src/daemon.rs — Module 4
 ### Daemon process. Holds vault in RAM. Serves secrets via Unix socket.
 
+**POC completion definition:**
+- The POC is complete only when `lokalvault run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"` prints `test-value-123`
+- Passing tests or partially implemented modules do not count on their own
+
 ### POC scope (build now):
 | Function | Description | Status |
 |---|---|---|
