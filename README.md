@@ -19,11 +19,11 @@ Your code gets its secrets. Your AI agent never does.
 The POC is not ready for use. Do not use this to store real secrets yet.
 
 Current phase: **Proof of Concept**
-- [ ] Core crypto (AES-256-GCM + Argon2id)
-- [ ] Vault file read/write
-- [ ] Daemon + Unix socket
-- [ ] Process spawn + env injection
-- [ ] SO_PEERCRED PID/UID verification
+- [x] Core crypto (AES-256-GCM + Argon2id)
+- [x] Vault file read/write
+- [x] Daemon + Unix socket
+- [x] Process spawn + env injection
+- [~] SO_PEERCRED / peer credential verification
 
 ---
 
@@ -72,7 +72,7 @@ lokalvault run
 your app (os.environ["KEY"] just works)
 ```
 
-Full architecture: [ARCHITECTURE.md](./ARCHITECTURE.md)
+Current repo docs: `docs/SPEC.md`, `docs/MODULE_MAP.md`, `docs/SECURITY_RULES.md`
 
 ---
 
@@ -84,7 +84,7 @@ This POC validates five things before building the full product:
 2. **Vault file format** — binary header + AES-GCM ciphertext survives disk
 3. **Daemon socket** — Rust daemon serves secrets over Unix socket at 0600
 4. **Process spawn + env injection** — child process receives secrets as env vars
-5. **SO_PEERCRED** — daemon verifies PID + UID of connecting process (Linux + macOS)
+5. **Peer credentials** — daemon verifies kernel-provided peer credentials and applies current POC request checks
 
 ---
 
@@ -109,9 +109,8 @@ cargo build
 # Run POC test suite
 cargo test
 
-# End-to-end test: daemon + Python client
-cargo run --bin daemon &
-python3 tests/client_test.py
+# Run full POC test suite
+cargo test
 ```
 
 ---
@@ -127,7 +126,7 @@ LokalVault is designed specifically against the AI agent threat:
 - Token issued only after human types a confirmation code
 - AI agents have no token → daemon rejects all their requests
 
-Full security model: [SECURITY.md](./SECURITY.md)
+Current security rules: `docs/SECURITY_RULES.md`
 
 **Honest scope:** LokalVault protects against accidental leaks, git
 commits, and AI agent access. It does not protect against local malware
