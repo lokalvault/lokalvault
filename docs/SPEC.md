@@ -1121,6 +1121,7 @@ Status in current repository snapshot:
 - macOS path now validates peer credentials with `getpeereid()` plus `LOCAL_PEERCRED`
 - Current macOS POC verifies UID successfully but still returns a placeholder PID value of `0`
 - The daemon POC now compares any client-reported `uid` field against kernel-provided peer credentials and rejects mismatches
+- The current `get_secret` POC request path also requires a `uid` field and rejects the request when that field is omitted
 - Tests now cover credential retrieval progress alongside the earlier daemon socket POC
 
 **Phase 0 success = you have proven the entire architecture.**

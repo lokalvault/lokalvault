@@ -33,7 +33,12 @@ async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let request = serde_json::json!({ "type": "get_secret", "key": "OPENAI_KEY" }).to_string();
+    let request = serde_json::json!({
+        "type": "get_secret",
+        "key": "OPENAI_KEY",
+        "uid": unsafe { libc::geteuid() }
+    })
+    .to_string();
     stream
         .write_all(request.as_bytes())
         .await

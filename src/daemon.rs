@@ -117,9 +117,14 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
     let request = read_json_request(stream).await?;
     let (peer_pid, peer_uid) = get_peer_credentials(stream)?;
 
-    validate_poc_peer_credentials(&request, peer_pid, peer_uid)?;
+    let request_type = request
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing request type".to_string())?;
 
-    if request.get("type") != Some(&serde_json::Value::String("get_secret".to_string())) {
+    validate_poc_peer_credentials(&request, request_type, peer_pid, peer_uid)?;
+
+    if request_type != "get_secret" {
         return Err("unsupported request type".to_string());
     }
 
@@ -133,6 +138,7 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
 
 fn validate_poc_peer_credentials(
     request: &serde_json::Value,
+    request_type: &str,
     peer_pid: u32,
     peer_uid: u32,
 ) -> Result<(), String> {
@@ -146,6 +152,10 @@ fn validate_poc_peer_credentials(
         if request_uid as u32 != peer_uid {
             return Err("client-reported uid mismatch".to_string());
         }
+    }
+
+    if request_type == "get_secret" && request.get("uid").is_none() {
+        return Err("get_secret request missing uid".to_string());
     }
 
     Ok(())
@@ -317,6 +327,38 @@ mod tests {
 
         let daemon_result = daemon.await.unwrap();
         assert_eq!(daemon_result.unwrap_err(), "client-reported uid mismatch");
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_daemon_poc_rejects_get_secret_without_uid() {
+        let socket_path = unique_poc_socket_path("daemon-missing-uid");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "get_secret",
+            "key": "OPENAI_KEY"
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(response.is_empty());
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "get_secret request missing uid");
         assert!(!Path::new(&socket_path_string).exists());
     }
 }
