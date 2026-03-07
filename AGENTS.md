@@ -36,7 +36,7 @@ Current completed modules in code:
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/daemon.rs` - next active target for completing macOS LOCAL_PEERCRED and broader credential checks
+- `src/daemon.rs` - next active target for broader credential checks and wiring peer credentials into request handling
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -140,7 +140,7 @@ The live codebase is smaller than the full spec.
 - `src/main.rs`: minimal binary entrypoint
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
-- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS placeholder for LOCAL_PEERCRED, and permission tests
+- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, and permission tests
 - `src/run_cmd.rs`: POC process spawning with daemon request and env injection test
 
 Planned modules in docs such as `src/vault_ops.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.

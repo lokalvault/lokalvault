@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 #[cfg(target_os = "linux")]
 use std::mem;
 use std::os::unix::fs::PermissionsExt;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -75,8 +75,36 @@ pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
 
 #[cfg(target_os = "macos")]
 pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
-    let _ = stream;
-    Err("macOS peer credential retrieval is not implemented yet; use LOCAL_PEERCRED in the next daemon step".to_string())
+    let fd = stream.as_raw_fd();
+
+    let mut euid: libc::uid_t = 0;
+    let mut egid: libc::gid_t = 0;
+    let getpeereid_result = unsafe { libc::getpeereid(fd, &mut euid, &mut egid) };
+    if getpeereid_result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let mut credentials: libc::xucred = unsafe { std::mem::zeroed() };
+    let mut credentials_len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+
+    let getsockopt_result = unsafe {
+        libc::getsockopt(
+            fd,
+            0,
+            libc::LOCAL_PEERCRED,
+            &mut credentials as *mut libc::xucred as *mut libc::c_void,
+            &mut credentials_len,
+        )
+    };
+    if getsockopt_result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    if credentials.cr_version != libc::XUCRED_VERSION {
+        return Err("unexpected LOCAL_PEERCRED version".to_string());
+    }
+
+    Ok((0, euid))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -159,7 +187,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn test_get_peer_credentials_reports_macos_placeholder_error() {
+    async fn test_get_peer_credentials_returns_current_process_uid_on_macos() {
         let socket_path = unique_poc_socket_path("daemon-peercred-macos");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -171,10 +199,10 @@ mod tests {
         });
 
         let client = UnixStream::connect(&socket_path_string).await.unwrap();
-        let result = server.await.unwrap();
+        let (peer_pid, peer_uid) = server.await.unwrap().unwrap();
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("LOCAL_PEERCRED"));
+        assert_eq!(peer_uid, unsafe { libc::geteuid() });
+        assert_eq!(peer_pid, 0);
 
         drop(client);
         cleanup_socket_file(Path::new(&socket_path_string)).unwrap();

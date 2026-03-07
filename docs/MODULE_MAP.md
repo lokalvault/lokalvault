@@ -121,8 +121,9 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 
 **Current credential-check progress:**
 - Linux: `get_peer_credentials` implemented with `getsockopt(..., SO_PEERCRED, ...)`
-- macOS: explicit placeholder error documents that `LOCAL_PEERCRED` is the next required implementation
-- Tests cover the Linux current-UID case and the macOS placeholder behavior
+- macOS: `getpeereid()` plus `LOCAL_PEERCRED` validation implemented for UID verification
+- Current macOS POC returns UID and a placeholder PID value of `0`; deeper PID retrieval remains a later daemon step
+- Tests cover Linux and macOS current-UID verification behavior
 
 ---
 
