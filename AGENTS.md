@@ -140,7 +140,7 @@ The live codebase is smaller than the full spec.
 - `src/main.rs`: minimal binary entrypoint
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
-- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, structured JSON error responses, and permission tests
+- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, structured JSON error responses, and permission tests
 - `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, structured daemon error handling, and env injection test
 
 Planned modules in docs such as `src/vault_ops.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.

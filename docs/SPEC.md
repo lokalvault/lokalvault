@@ -1123,6 +1123,8 @@ Status in current repository snapshot:
 - The daemon POC now compares any client-reported `uid` field against kernel-provided peer credentials and rejects mismatches
 - The current `get_secret` POC request path also requires a `uid` field and rejects the request when that field is omitted
 - Current POC daemon rejection paths return structured JSON errors in the form `{"error":"..."}`
+- The daemon POC flow is now explicitly split into peer-credential read, request parse, request validation, request routing, and response write steps
+- The current `get_secret` POC only serves `OPENAI_KEY`; other keys are rejected with a structured JSON error
 - Tests now cover credential retrieval progress alongside the earlier daemon socket POC
 
 **Phase 0 success = you have proven the entire architecture.**

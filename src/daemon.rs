@@ -13,6 +13,19 @@ use tokio::net::{UnixListener, UnixStream};
 
 pub const POC_SOCKET_PATH: &str = "/tmp/lokalvault-test.sock";
 
+struct PeerCredentials {
+    pid: u32,
+    uid: u32,
+}
+
+enum PocRequest {
+    GetSecret {
+        key: String,
+        uid: u32,
+        pid: Option<u32>,
+    },
+}
+
 pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
     create_socket_at_path(PathBuf::from(POC_SOCKET_PATH))
 }
@@ -26,7 +39,7 @@ pub async fn run_daemon_poc_at_path(socket_path: PathBuf) -> Result<(), String> 
 
     let result = async {
         let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-        handle_poc_connection(&mut stream).await?;
+        handle_connection(&mut stream).await?;
         Ok(())
     }
     .await;
@@ -116,30 +129,93 @@ pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
 
 async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
     let request = read_json_request(stream).await?;
-    let (peer_pid, peer_uid) = get_peer_credentials(stream)?;
+    let peer_credentials = read_peer_credentials(stream)?;
+    let request = parse_poc_request(&request)?;
+    validate_poc_request(&request, &peer_credentials)?;
+    let response = route_poc_request(request)?;
 
-    let request_type = request
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "missing request type".to_string())?;
-
-    if let Err(error) = validate_poc_peer_credentials(&request, request_type, peer_pid, peer_uid) {
-        write_error_response(stream, &error).await?;
-        return Err(error);
-    }
-
-    if request_type != "get_secret" {
-        let error = "unsupported request type".to_string();
-        write_error_response(stream, &error).await?;
-        return Err(error);
-    }
-
-    let response = json!({ "value": "test-value-123" }).to_string();
     stream
         .write_all(response.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
     stream.shutdown().await.map_err(|e| e.to_string())
+}
+
+async fn handle_connection(stream: &mut UnixStream) -> Result<(), String> {
+    match handle_poc_connection(stream).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            write_error_response(stream, &error).await?;
+            Err(error)
+        }
+    }
+}
+
+fn read_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials, String> {
+    let (pid, uid) = get_peer_credentials(stream)?;
+    Ok(PeerCredentials { pid, uid })
+}
+
+fn parse_poc_request(request: &serde_json::Value) -> Result<PocRequest, String> {
+    let request_type = request
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing request type".to_string())?;
+
+    match request_type {
+        "get_secret" => {
+            let key = request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "get_secret request missing key".to_string())?
+                .to_string();
+            let uid = request
+                .get("uid")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "get_secret request missing uid".to_string())?
+                as u32;
+            let pid = request
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .map(|pid| pid as u32);
+
+            Ok(PocRequest::GetSecret { key, uid, pid })
+        }
+        _ => Err("unsupported request type".to_string()),
+    }
+}
+
+fn validate_poc_request(
+    request: &PocRequest,
+    peer_credentials: &PeerCredentials,
+) -> Result<(), String> {
+    match request {
+        PocRequest::GetSecret { uid, pid, .. } => {
+            if *uid != peer_credentials.uid {
+                return Err("client-reported uid mismatch".to_string());
+            }
+
+            if let Some(pid) = pid {
+                if *pid != peer_credentials.pid {
+                    return Err("client-reported pid mismatch".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn route_poc_request(request: PocRequest) -> Result<String, String> {
+    match request {
+        PocRequest::GetSecret { key, .. } => {
+            if key != "OPENAI_KEY" {
+                return Err("unknown secret key".to_string());
+            }
+
+            Ok(json!({ "value": "test-value-123" }).to_string())
+        }
+    }
 }
 
 async fn write_error_response(stream: &mut UnixStream, error: &str) -> Result<(), String> {
@@ -149,31 +225,6 @@ async fn write_error_response(stream: &mut UnixStream, error: &str) -> Result<()
         .await
         .map_err(|e| e.to_string())?;
     stream.shutdown().await.map_err(|e| e.to_string())
-}
-
-fn validate_poc_peer_credentials(
-    request: &serde_json::Value,
-    request_type: &str,
-    peer_pid: u32,
-    peer_uid: u32,
-) -> Result<(), String> {
-    if let Some(request_pid) = request.get("pid").and_then(serde_json::Value::as_u64) {
-        if request_pid as u32 != peer_pid {
-            return Err("client-reported pid mismatch".to_string());
-        }
-    }
-
-    if let Some(request_uid) = request.get("uid").and_then(serde_json::Value::as_u64) {
-        if request_uid as u32 != peer_uid {
-            return Err("client-reported uid mismatch".to_string());
-        }
-    }
-
-    if request_type == "get_secret" && request.get("uid").is_none() {
-        return Err("get_secret request missing uid".to_string());
-    }
-
-    Ok(())
 }
 
 async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value, String> {
@@ -412,6 +463,41 @@ mod tests {
 
         let daemon_result = daemon.await.unwrap();
         assert_eq!(daemon_result.unwrap_err(), "unsupported request type");
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_daemon_poc_rejects_unknown_secret_key() {
+        let socket_path = unique_poc_socket_path("daemon-bad-key");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "get_secret",
+            "key": "MISSING_KEY",
+            "uid": unsafe { libc::geteuid() }
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "unknown secret key");
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "unknown secret key");
         assert!(!Path::new(&socket_path_string).exists());
     }
 }

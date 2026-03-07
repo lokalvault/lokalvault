@@ -127,6 +127,8 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - POC request handling now rejects client-reported `uid` values when they do not match kernel-provided peer credentials
 - `get_secret` requests in the current POC must include `uid`, and the daemon rejects the request if it is missing
 - POC rejection paths now return structured JSON errors like `{"error":"..."}` instead of silently closing with no response
+- POC flow is now explicitly shaped as: read peer credentials -> parse request -> validate request -> route request -> write response
+- `get_secret` currently only supports `OPENAI_KEY`; unknown keys return a structured JSON error
 
 ---
 
