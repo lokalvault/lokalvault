@@ -129,6 +129,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - POC rejection paths now return structured JSON errors like `{"error":"..."}` instead of silently closing with no response
 - POC flow is now explicitly shaped as: read peer credentials -> parse request -> validate request -> route request -> write response
 - `get_secret` currently only supports `OPENAI_KEY`; unknown keys return a structured JSON error
+- Linux POC now requires a `pid` field on `get_secret` requests, but currently only accepts the placeholder value `0`; nonzero PID validation remains a later daemon step
 
 ---
 

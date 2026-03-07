@@ -26,6 +26,10 @@ enum PocRequest {
     },
 }
 
+fn peer_pid_is_required() -> bool {
+    cfg!(target_os = "linux")
+}
+
 pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
     create_socket_at_path(PathBuf::from(POC_SOCKET_PATH))
 }
@@ -179,6 +183,10 @@ fn parse_poc_request(request: &serde_json::Value) -> Result<PocRequest, String> 
                 .and_then(serde_json::Value::as_u64)
                 .map(|pid| pid as u32);
 
+            if peer_pid_is_required() && pid.is_none() {
+                return Err("get_secret request missing pid".to_string());
+            }
+
             Ok(PocRequest::GetSecret { key, uid, pid })
         }
         _ => Err("unsupported request type".to_string()),
@@ -195,7 +203,11 @@ fn validate_poc_request(
                 return Err("client-reported uid mismatch".to_string());
             }
 
-            if let Some(pid) = pid {
+            if peer_pid_is_required() {
+                if *pid != Some(0) {
+                    return Err("client-reported pid mismatch".to_string());
+                }
+            } else if let Some(pid) = pid {
                 if *pid != peer_credentials.pid {
                     return Err("client-reported pid mismatch".to_string());
                 }
@@ -346,7 +358,8 @@ mod tests {
         let request = json!({
             "type": "get_secret",
             "key": "OPENAI_KEY",
-            "uid": unsafe { libc::geteuid() }
+            "uid": unsafe { libc::geteuid() },
+            "pid": 0
         })
         .to_string();
         stream.write_all(request.as_bytes()).await.unwrap();
@@ -381,7 +394,8 @@ mod tests {
         let request = json!({
             "type": "get_secret",
             "key": "OPENAI_KEY",
-            "uid": u64::from(unsafe { libc::geteuid() }) + 1
+            "uid": u64::from(unsafe { libc::geteuid() }) + 1,
+            "pid": 0
         })
         .to_string();
         stream.write_all(request.as_bytes()).await.unwrap();
@@ -429,6 +443,79 @@ mod tests {
 
         let daemon_result = daemon.await.unwrap();
         assert_eq!(daemon_result.unwrap_err(), "get_secret request missing uid");
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_run_daemon_poc_rejects_get_secret_without_pid_on_linux() {
+        let socket_path = unique_poc_socket_path("daemon-missing-pid");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "get_secret",
+            "key": "OPENAI_KEY",
+            "uid": unsafe { libc::geteuid() }
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "get_secret request missing pid");
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "get_secret request missing pid");
+        assert!(!Path::new(&socket_path_string).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_run_daemon_poc_rejects_nonzero_pid_claim_on_linux() {
+        let socket_path = unique_poc_socket_path("daemon-bad-pid");
+        let socket_path_string = socket_path.to_string_lossy().to_string();
+        cleanup_socket_file(&socket_path).unwrap();
+        let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
+
+        for _ in 0..50 {
+            if Path::new(&socket_path_string).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
+        let request = json!({
+            "type": "get_secret",
+            "key": "OPENAI_KEY",
+            "uid": unsafe { libc::geteuid() },
+            "pid": 12345
+        })
+        .to_string();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response_json["error"], "client-reported pid mismatch");
+
+        let daemon_result = daemon.await.unwrap();
+        assert_eq!(daemon_result.unwrap_err(), "client-reported pid mismatch");
         assert!(!Path::new(&socket_path_string).exists());
     }
 
@@ -484,7 +571,8 @@ mod tests {
         let request = json!({
             "type": "get_secret",
             "key": "MISSING_KEY",
-            "uid": unsafe { libc::geteuid() }
+            "uid": unsafe { libc::geteuid() },
+            "pid": 0
         })
         .to_string();
         stream.write_all(request.as_bytes()).await.unwrap();
