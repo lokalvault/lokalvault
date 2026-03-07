@@ -1,0 +1,15 @@
+[package]
+name = "lokalvault"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lokalvault"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm  = "0.10"
+argon2   = "0.5"
+rand     = { version = "0.8", features = ["getrandom"] }
+zeroize  = { version = "1", features = ["derive"] }
+hex      = "0.4"
