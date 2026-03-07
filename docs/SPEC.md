@@ -1126,6 +1126,7 @@ Status in current repository snapshot:
 - The daemon POC flow is now explicitly split into peer-credential read, request parse, request validation, request routing, and response write steps
 - The current `get_secret` POC only serves `OPENAI_KEY`; other keys are rejected with a structured JSON error
 - On Linux, the current POC also requires a `pid` field on `get_secret`, but only the placeholder value `0` is accepted until the next PID-validation step is implemented
+- Internally, the daemon POC now uses explicit daemon error variants before encoding failures into the public JSON error shape
 - Tests now cover credential retrieval progress alongside the earlier daemon socket POC
 
 **Phase 0 success = you have proven the entire architecture.**

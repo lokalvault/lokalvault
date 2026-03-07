@@ -18,6 +18,38 @@ struct PeerCredentials {
     uid: u32,
 }
 
+enum DaemonError {
+    MissingRequestType,
+    UnsupportedRequestType,
+    MissingSecretKey,
+    MissingUid,
+    MissingPid,
+    UidMismatch,
+    PidMismatch,
+    UnknownSecretKey,
+    Io(String),
+    InvalidJson(String),
+    PeerCredentials(String),
+}
+
+impl DaemonError {
+    fn message(&self) -> String {
+        match self {
+            Self::MissingRequestType => "missing request type".to_string(),
+            Self::UnsupportedRequestType => "unsupported request type".to_string(),
+            Self::MissingSecretKey => "get_secret request missing key".to_string(),
+            Self::MissingUid => "get_secret request missing uid".to_string(),
+            Self::MissingPid => "get_secret request missing pid".to_string(),
+            Self::UidMismatch => "client-reported uid mismatch".to_string(),
+            Self::PidMismatch => "client-reported pid mismatch".to_string(),
+            Self::UnknownSecretKey => "unknown secret key".to_string(),
+            Self::Io(message) => message.clone(),
+            Self::InvalidJson(message) => message.clone(),
+            Self::PeerCredentials(message) => message.clone(),
+        }
+    }
+}
+
 enum PocRequest {
     GetSecret {
         key: String,
@@ -42,7 +74,10 @@ pub async fn run_daemon_poc_at_path(socket_path: PathBuf) -> Result<(), String> 
     let (socket_path, listener) = create_socket_at_path(socket_path)?;
 
     let result = async {
-        let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| DaemonError::Io(e.to_string()).message())?;
         handle_connection(&mut stream).await?;
         Ok(())
     }
@@ -132,11 +167,11 @@ pub fn get_peer_credentials(stream: &UnixStream) -> Result<(u32, u32), String> {
 }
 
 async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
-    let request = read_json_request(stream).await?;
-    let peer_credentials = read_peer_credentials(stream)?;
-    let request = parse_poc_request(&request)?;
-    validate_poc_request(&request, &peer_credentials)?;
-    let response = route_poc_request(request)?;
+    let request = read_json_request(stream).await.map_err(|e| e.message())?;
+    let peer_credentials = read_peer_credentials(stream).map_err(|e| e.message())?;
+    let request = parse_poc_request(&request).map_err(|e| e.message())?;
+    validate_poc_request(&request, &peer_credentials).map_err(|e| e.message())?;
+    let response = route_poc_request(request).map_err(|e| e.message())?;
 
     stream
         .write_all(response.as_bytes())
@@ -155,61 +190,60 @@ async fn handle_connection(stream: &mut UnixStream) -> Result<(), String> {
     }
 }
 
-fn read_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials, String> {
-    let (pid, uid) = get_peer_credentials(stream)?;
+fn read_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials, DaemonError> {
+    let (pid, uid) = get_peer_credentials(stream).map_err(DaemonError::PeerCredentials)?;
     Ok(PeerCredentials { pid, uid })
 }
 
-fn parse_poc_request(request: &serde_json::Value) -> Result<PocRequest, String> {
+fn parse_poc_request(request: &serde_json::Value) -> Result<PocRequest, DaemonError> {
     let request_type = request
         .get("type")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "missing request type".to_string())?;
+        .ok_or(DaemonError::MissingRequestType)?;
 
     match request_type {
         "get_secret" => {
             let key = request
                 .get("key")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "get_secret request missing key".to_string())?
+                .ok_or(DaemonError::MissingSecretKey)?
                 .to_string();
             let uid = request
                 .get("uid")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "get_secret request missing uid".to_string())?
-                as u32;
+                .ok_or(DaemonError::MissingUid)? as u32;
             let pid = request
                 .get("pid")
                 .and_then(serde_json::Value::as_u64)
                 .map(|pid| pid as u32);
 
             if peer_pid_is_required() && pid.is_none() {
-                return Err("get_secret request missing pid".to_string());
+                return Err(DaemonError::MissingPid);
             }
 
             Ok(PocRequest::GetSecret { key, uid, pid })
         }
-        _ => Err("unsupported request type".to_string()),
+        _ => Err(DaemonError::UnsupportedRequestType),
     }
 }
 
 fn validate_poc_request(
     request: &PocRequest,
     peer_credentials: &PeerCredentials,
-) -> Result<(), String> {
+) -> Result<(), DaemonError> {
     match request {
         PocRequest::GetSecret { uid, pid, .. } => {
             if *uid != peer_credentials.uid {
-                return Err("client-reported uid mismatch".to_string());
+                return Err(DaemonError::UidMismatch);
             }
 
             if peer_pid_is_required() {
                 if *pid != Some(0) {
-                    return Err("client-reported pid mismatch".to_string());
+                    return Err(DaemonError::PidMismatch);
                 }
             } else if let Some(pid) = pid {
                 if *pid != peer_credentials.pid {
-                    return Err("client-reported pid mismatch".to_string());
+                    return Err(DaemonError::PidMismatch);
                 }
             }
         }
@@ -218,11 +252,11 @@ fn validate_poc_request(
     Ok(())
 }
 
-fn route_poc_request(request: PocRequest) -> Result<String, String> {
+fn route_poc_request(request: PocRequest) -> Result<String, DaemonError> {
     match request {
         PocRequest::GetSecret { key, .. } => {
             if key != "OPENAI_KEY" {
-                return Err("unknown secret key".to_string());
+                return Err(DaemonError::UnknownSecretKey);
             }
 
             Ok(json!({ "value": "test-value-123" }).to_string())
@@ -239,12 +273,15 @@ async fn write_error_response(stream: &mut UnixStream, error: &str) -> Result<()
     stream.shutdown().await.map_err(|e| e.to_string())
 }
 
-async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value, String> {
+async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value, DaemonError> {
     let mut request = Vec::new();
     let mut chunk = [0u8; 1024];
 
     loop {
-        let bytes_read = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        let bytes_read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| DaemonError::Io(e.to_string()))?;
         if bytes_read == 0 {
             break;
         }
@@ -254,11 +291,13 @@ async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value,
         match serde_json::from_slice::<serde_json::Value>(&request) {
             Ok(value) => return Ok(value),
             Err(err) if err.is_eof() => continue,
-            Err(err) => return Err(err.to_string()),
+            Err(err) => return Err(DaemonError::InvalidJson(err.to_string())),
         }
     }
 
-    Err(io::Error::new(ErrorKind::UnexpectedEof, "empty request").to_string())
+    Err(DaemonError::Io(
+        io::Error::new(ErrorKind::UnexpectedEof, "empty request").to_string(),
+    ))
 }
 
 fn cleanup_socket_file(path: &Path) -> Result<(), String> {
