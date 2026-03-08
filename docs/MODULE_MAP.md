@@ -69,23 +69,28 @@ Offset  Size  Field
 
 | Function | Signature | Status |
 |---|---|---|
-| `create_vault` | `(password: &str) → Result<()>` | 🔄 NEXT |
-| `unlock_vault` | `(password: &str) → Result<VaultData>` | 🔄 NEXT |
-| `lock_vault` | `(vault: &mut VaultData)` | 🔄 NEXT |
-| `add_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | 🔄 NEXT |
-| `delete_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | 🔄 NEXT |
-| `add_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | 🔄 NEXT |
-| `update_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | 🔄 NEXT |
-| `delete_secret` | `(vault: &mut VaultData, project: &str, key: &str) → Result<()>` | 🔄 NEXT |
-| `list_projects` | `(vault: &VaultData) → Vec<ProjectSummary>` | 🔄 NEXT |
-| `list_secret_keys` | `(vault: &VaultData, project: &str) → Result<Vec<String>>` | 🔄 NEXT |
-| `import_dotenv` | `(vault: &mut VaultData, project: &str, path: &Path) → Result<ImportResult>` | 🔄 NEXT |
-| `change_master_password` | `(vault: &mut VaultData, current: &str, new: &str) → Result<()>` | 🔄 NEXT |
+| `create_vault` | `(password: &str) → Result<()>` | ✅ Done |
+| `unlock_vault` | `(password: &str) → Result<VaultData>` | ✅ Done |
+| `lock_vault` | `(vault: &mut VaultData)` | ✅ Done |
+| `add_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | ✅ Done |
+| `delete_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | ✅ Done |
+| `add_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | ✅ Done |
+| `update_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | ✅ Done |
+| `delete_secret` | `(vault: &mut VaultData, project: &str, key: &str) → Result<()>` | ✅ Done |
+| `list_projects` | `(vault: &VaultData) → Vec<ProjectSummary>` | ✅ Done |
+| `list_secret_keys` | `(vault: &VaultData, project: &str) → Result<Vec<String>>` | ✅ Done |
+| `import_dotenv` | `(vault: &mut VaultData, project: &str, path: &Path) → Result<ImportResult>` | ✅ Done |
+| `change_master_password` | `(vault: &mut VaultData, current: &str, new: &str) → Result<()>` | ✅ Done |
 
 **Validation rules (enforced here):**
 - Project names: alphanumeric + hyphens only, max 64 chars, unique
 - Secret keys: SCREAMING_SNAKE_CASE only (A-Z, 0-9, _), unique per project
 - Secret values: any string, held in Zeroizing<String> during transit
+
+**Current implementation status:**
+- CRUD and validation layer implemented
+- Includes unit tests for create/unlock, CRUD operations, listing, dotenv import, and password change
+- Persists through `src/vault_file.rs`
 
 ---
 

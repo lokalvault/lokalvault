@@ -241,10 +241,10 @@ fn validate_poc_request(
                 if *pid != Some(0) {
                     return Err(DaemonError::PidMismatch);
                 }
-            } else if let Some(pid) = pid {
-                if *pid != peer_credentials.pid {
-                    return Err(DaemonError::PidMismatch);
-                }
+            } else if let Some(pid) = pid
+                && *pid != peer_credentials.pid
+            {
+                return Err(DaemonError::PidMismatch);
             }
         }
     }

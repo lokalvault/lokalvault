@@ -2,6 +2,7 @@ mod crypto;
 mod daemon;
 mod run_cmd;
 mod vault_file;
+mod vault_ops;
 
 use clap::{Parser, Subcommand};
 

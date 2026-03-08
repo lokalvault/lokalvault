@@ -1145,7 +1145,7 @@ The CLI and Rust core are the product foundation.
 The Tauri + React UI is a later thin layer over the same Rust modules, not the source of truth.
 
 ### Phase 1A — Core Rust
-- `src/vault_ops.rs`
+- `src/vault_ops.rs` ✅ complete
 - `src/errors.rs`
 - real `src/daemon.rs`
 - real `src/run_cmd.rs`

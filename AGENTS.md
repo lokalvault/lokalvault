@@ -50,8 +50,8 @@ The UI is a later thin layer over the Rust core and CLI, not the source of truth
 | 2    | Vault File   | `src/vault_file.rs` | ✅ DONE   |
 | 3    | Daemon POC   | `src/daemon.rs`   | ✅ DONE     |
 | 4    | Run POC      | `src/run_cmd.rs`  | ✅ DONE     |
-| 5    | Vault Ops    | `src/vault_ops.rs` | 🔄 NEXT    |
-| 6    | Errors       | `src/errors.rs`   | ⬜ PENDING  |
+| 5    | Vault Ops    | `src/vault_ops.rs` | ✅ DONE    |
+| 6    | Errors       | `src/errors.rs`   | 🔄 NEXT     |
 | 7    | Daemon Real  | `src/daemon.rs`   | ⬜ PENDING  |
 | 8    | Run Real     | `src/run_cmd.rs`  | ⬜ PENDING  |
 | 9    | CLI          | `src/cli.rs`      | ⬜ PENDING  |
@@ -62,7 +62,7 @@ The UI is a later thin layer over the Rust core and CLI, not the source of truth
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/vault_ops.rs` - implement the full CRUD and validation layer first
+- `src/errors.rs` - add the shared application error layer next
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -180,7 +180,8 @@ The live codebase is smaller than the full spec.
 - `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, placeholder PID enforcement for Linux requests, explicit internal daemon error variants, structured JSON error responses, and permission tests
 - `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, and env injection test
 
-Planned modules in docs such as `src/vault_ops.rs`, `src/errors.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
+- `src/vault_ops.rs`: full CRUD and validation layer with unit tests
+- Planned modules in docs such as `src/errors.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
 ## Rust Style Guidelines
