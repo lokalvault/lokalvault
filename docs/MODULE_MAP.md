@@ -214,9 +214,10 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `cmd_status` | Show vault/daemon/session status |
 
 **Current implementation status:**
-- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_status`, and `cmd_push` implemented
+- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_status`, and `cmd_push` implemented at an initial Phase 1B level
 - Uses clap-based command routing from `src/main.rs`
 - Includes tests for init/config creation, project/key summary helpers, and push target command wiring
+- Still completing daemon-sync behavior, real run integration, and broader parsing/routing coverage before declaring the CLI module done
 
 ---
 
