@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod crypto;
 pub mod daemon;
 pub mod errors;

@@ -68,15 +68,15 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 | 7    | Errors       | `src/errors.rs`   | ✅ DONE     |
 | 8    | Daemon Real  | `src/daemon.rs`   | ✅ DONE     |
 | 9    | Run Real     | `src/run_cmd.rs`  | ✅ DONE     |
-| 10   | CLI          | `src/cli.rs`      | 🔄 NEXT     |
-| 11   | Audit Log    | `src/audit_log.rs` | ⬜ PENDING |
+| 10   | CLI          | `src/cli.rs`      | ✅ DONE     |
+| 11   | Audit Log    | `src/audit_log.rs` | 🔄 NEXT    |
 | 12   | Settings     | `src/settings.rs` | ⬜ PENDING  |
 | 13   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
 | 14   | React UI     | `src/`            | ⬜ PHASE 1C |
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/cli.rs` - build the full CLI command surface next
+- `src/audit_log.rs` - build the audit logging module next
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -198,7 +198,8 @@ The live codebase is smaller than the full spec.
 - `src/vault_ops.rs`: full CRUD and validation layer with unit tests
 - `src/errors.rs`: shared application error enum with unit tests and minimal `vault_ops` integration
 - `tests/`: integration scaffolding with `vault_roundtrip`, `poc_demo`, and `end_to_end` coverage placeholders
-- Planned modules in docs such as `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
+- `src/cli.rs`: full CLI command surface with Phase 1B command routing and tests
+- Planned modules in docs such as `src/settings.rs` and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
 ## Rust Style Guidelines
