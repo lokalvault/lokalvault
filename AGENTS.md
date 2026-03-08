@@ -42,6 +42,19 @@ The UI is a later thin layer over the Rust core and CLI, not the source of truth
 - `Phase 1B` - `src/cli.rs` -> `src/audit_log.rs` -> `src/settings.rs`
 - `Phase 1C` - Tauri + React UI
 
+### Phase 1A Completion Bar
+
+Phase 1A is complete only when all of the following are true:
+
+- `src/vault_ops.rs` is stable and fully tested
+- `src/errors.rs` is in place and used by new core work
+- real `src/daemon.rs` has coherent vault-backed and token-aware behavior
+- real `src/run_cmd.rs` uses correct phase1 -> spawn -> phase2 ordering
+- terminal approval uses a non-deterministic code
+- integration tests prove the token-aware run flow across modules
+
+Do not declare Phase 1A complete while placeholder security logic still defines the real run path.
+
 ### Status Table
 
 | Step | Module       | File              | Status      |

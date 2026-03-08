@@ -15,6 +15,11 @@ If you're unsure where something goes: check this file first.
 7. `src/settings.rs`
 8. `src-tauri/` and React UI
 
+**Phase 1A completion bar:**
+- `src/vault_ops.rs`, `src/errors.rs`, real `src/daemon.rs`, and real `src/run_cmd.rs` must all be implemented and tested
+- real `src/run_cmd.rs` must use phase1 -> spawn -> phase2 ordering with a non-deterministic terminal approval code
+- integration tests must prove the token-aware run flow across modules
+
 ---
 
 ## src/crypto.rs — Module 1
