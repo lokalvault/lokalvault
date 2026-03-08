@@ -1,4 +1,5 @@
-use crate::crypto::{decrypt, derive_key, encrypt, generate_nonce, generate_salt};
+use crate::crypto::{decrypt, derive_key_with_params, encrypt, generate_nonce, generate_salt};
+use crate::settings::read_settings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,7 +79,14 @@ fn get_temp_vault_path(path: &Path) -> PathBuf {
 pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
     let salt = generate_salt();
     let nonce = generate_nonce();
-    let key = derive_key(password, &salt);
+    let settings = read_settings();
+    let key = derive_key_with_params(
+        password,
+        &salt,
+        settings.argon2_memory_kb,
+        settings.argon2_iterations,
+        settings.argon2_parallelism,
+    );
 
     let json = serde_json::to_vec(vault).map_err(|e| e.to_string())?;
     let ciphertext = encrypt(&json, &key, &nonce);
@@ -119,7 +127,14 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
     let nonce: [u8; 12] = bytes[37..49].try_into().unwrap();
     let ciphertext: &[u8] = &bytes[49..];
 
-    let key = derive_key(password, &salt);
+    let settings = read_settings();
+    let key = derive_key_with_params(
+        password,
+        &salt,
+        settings.argon2_memory_kb,
+        settings.argon2_iterations,
+        settings.argon2_parallelism,
+    );
     let plaintext = decrypt(ciphertext, &key, &nonce)?;
 
     serde_json::from_slice(&plaintext).map_err(|e| e.to_string())

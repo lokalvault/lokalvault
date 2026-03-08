@@ -772,6 +772,51 @@ fn handle_ipc_request(
             json!({ "ok": true })
         }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
+        "register_token_phase1" => {
+            let token = request
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing token".to_string())?;
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let uid = unsafe { libc::geteuid() };
+            register_token_phase1(state, token, uid, project)?;
+            json!({ "ok": true })
+        }
+        "register_token_phase2" => {
+            let token = request
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing token".to_string())?;
+            let pid = request
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "missing pid".to_string())? as u32;
+            let timeout_minutes = read_settings().session_timeout_minutes as u64;
+            register_token_phase2(state, token, pid, Duration::from_secs(timeout_minutes * 60))?;
+            monitor_child_pid(
+                state.clone(),
+                pid,
+                token.to_string(),
+                Duration::from_millis(100),
+            );
+            json!({ "ok": true })
+        }
+        "get_all_secrets_for_run" => {
+            let token = request
+                .get("token")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing token".to_string())?;
+            let pid = request
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "missing pid".to_string())? as u32;
+            let uid = unsafe { libc::geteuid() };
+            let secrets = fetch_all_secrets(state, token, pid, uid).map_err(|e| e.message())?;
+            json!({ "ok": true, "secrets": secrets })
+        }
         "log_access" => {
             let event: AccessEvent =
                 serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;

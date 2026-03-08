@@ -9,7 +9,27 @@ pub fn get_socket_path() -> PathBuf {
 }
 
 pub fn is_daemon_running() -> bool {
-    UnixStream::connect(get_socket_path()).is_ok()
+    match UnixStream::connect(get_socket_path()) {
+        Ok(_) => true,
+        Err(error) => {
+            if get_socket_path().exists() && is_connection_refused(&error) {
+                cleanup_stale_socket();
+            }
+            false
+        }
+    }
+}
+
+pub fn cleanup_stale_socket() {
+    let socket_path = get_socket_path();
+    if !socket_path.exists() {
+        return;
+    }
+    if let Err(error) = UnixStream::connect(&socket_path)
+        && is_connection_refused(&error)
+    {
+        let _ = std::fs::remove_file(socket_path);
+    }
 }
 
 pub fn send_ipc_request(request: Value) -> Result<Value, String> {
@@ -29,4 +49,8 @@ pub fn send_ipc_request(request: Value) -> Result<Value, String> {
     }
 
     serde_json::from_str(response.trim()).map_err(|e| e.to_string())
+}
+
+fn is_connection_refused(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::ConnectionRefused)
 }

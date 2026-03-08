@@ -1161,6 +1161,11 @@ Phase 1A completion result in current repository snapshot:
 - `src/audit_log.rs`
 - `src/settings.rs`
 
+### Pre-Phase-1C Completion Pass
+- Finish CLI/product hardening before any Tauri or React work
+- Close Group 1 technical debt first: real token-backed `run`, Argon2 runtime wiring, exit-code passthrough, and daemon lifecycle hardening
+- Build Groups 2-4 on top of that stable base so the UI inherits completed product behavior instead of compensating for missing backend features
+
 ### Phase 1C — Tauri + React UI
 - `src-tauri/`
 - React frontend

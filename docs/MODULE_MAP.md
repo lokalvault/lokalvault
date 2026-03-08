@@ -15,6 +15,17 @@ If you're unsure where something goes: check this file first.
 7. `src/settings.rs`
 8. `src-tauri/` and React UI
 
+## Pre-Phase-1C Completion Pass
+
+Before any Tauri/React work begins, finish these CLI/product hardening groups in order:
+
+1. Group 1 - technical debt blockers (`run`, Argon2 runtime wiring, exit-code passthrough, daemon lifecycle hardening)
+2. Group 2 - developer experience commands (`doctor`, `.env` warnings, completion, `dev`, rotation tracking)
+3. Group 3 - AI-safe mode (`ai-safe`, required keys enforcement, `.lve` sharing)
+4. Group 4 - repo protection (`protect-repo`, `scan-diff`)
+
+The UI must remain a thin shell over these completed CLI/product features.
+
 **Phase 1A completion bar:**
 - `src/vault_ops.rs`, `src/errors.rs`, real `src/daemon.rs`, and real `src/run_cmd.rs` must all be implemented and tested
 - real `src/run_cmd.rs` must use phase1 -> spawn -> phase2 ordering with a non-deterministic terminal approval code

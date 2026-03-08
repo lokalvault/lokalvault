@@ -1,4 +1,6 @@
+use crate::crypto::benchmark_argon2;
 use crate::errors::AppError;
+use crate::settings::{read_settings, write_settings};
 use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, write_vault};
 use std::fs;
 use std::path::Path;
@@ -19,6 +21,13 @@ pub fn create_vault(password: &str) -> Result<(), String> {
     if get_vault_path().exists() {
         return Err(AppError::ValidationError("vault already exists".to_string()).to_string());
     }
+
+    let (memory_kb, iterations, parallelism) = benchmark_argon2();
+    let mut settings = read_settings();
+    settings.argon2_memory_kb = memory_kb;
+    settings.argon2_iterations = iterations;
+    settings.argon2_parallelism = parallelism;
+    write_settings(&settings)?;
 
     write_vault(&VaultData::new(), password)
 }

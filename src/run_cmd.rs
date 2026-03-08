@@ -3,6 +3,7 @@ use crate::daemon::{
     DaemonState, POC_SOCKET_PATH, fetch_all_secrets as fetch_all_secrets_from_state,
     register_token_phase1, register_token_phase2,
 };
+use crate::ipc_client::send_ipc_request;
 use crate::settings::read_settings;
 use crate::vault_file::get_vault_path;
 use std::collections::HashMap;
@@ -103,7 +104,7 @@ pub async fn cmd_run_entry(
     };
 
     if crate::ipc_client::is_daemon_running() && resolved_project.is_some() {
-        return Err("real daemon-backed run path is not wired yet".to_string());
+        return run_with_real_daemon(resolved_project.as_deref().unwrap(), command).await;
     }
 
     if crate::ipc_client::is_daemon_running() && resolved_project.is_none() {
@@ -129,6 +130,62 @@ pub async fn cmd_run_entry(
     }
 
     cmd_run_unified(None, resolved_project.as_deref(), command).await
+}
+
+async fn run_with_real_daemon(
+    project: &str,
+    command: Vec<String>,
+) -> Result<std::process::ExitStatus, String> {
+    if command.is_empty() {
+        return Err("command cannot be empty".to_string());
+    }
+
+    let token = generate_token();
+    let phase1 = send_ipc_request(serde_json::json!({
+        "type": "register_token_phase1",
+        "token": token,
+        "project": project,
+    }))?;
+    if phase1.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(phase1["error"]
+            .as_str()
+            .unwrap_or("token registration failed")
+            .to_string());
+    }
+
+    let secrets_response = send_ipc_request(serde_json::json!({
+        "type": "get_all_secrets_for_run",
+        "token": token,
+        "pid": 0,
+    }))?;
+    let secrets = secrets_response["secrets"]
+        .as_object()
+        .ok_or_else(|| "daemon response missing secrets".to_string())?
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
+        .collect::<HashMap<_, _>>();
+
+    let mut cmd = Command::new(&command[0]);
+    if command.len() > 1 {
+        cmd.args(&command[1..]);
+    }
+    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+
+    let phase2 = send_ipc_request(serde_json::json!({
+        "type": "register_token_phase2",
+        "token": token,
+        "pid": pid,
+    }))?;
+    if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(phase2["error"]
+            .as_str()
+            .unwrap_or("token activation failed")
+            .to_string());
+    }
+
+    child.wait().map_err(|e| e.to_string())
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {

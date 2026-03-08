@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
+use std::time::Instant;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -20,13 +21,42 @@ pub fn generate_nonce() -> [u8; 12] {
 }
 
 pub fn derive_key(password: &str, salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {
-    let params = Params::new(65536, 3, 1, Some(32)).unwrap();
+    derive_key_with_params(password, salt, 65_536, 3, 1)
+}
+
+pub fn derive_key_with_params(
+    password: &str,
+    salt: &[u8; 32],
+    memory_kb: u32,
+    iterations: u32,
+    parallelism: u32,
+) -> Zeroizing<[u8; 32]> {
+    let params = Params::new(memory_kb, iterations, parallelism, Some(32)).unwrap();
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon2
         .hash_password_into(password.as_bytes(), salt, key.as_mut())
         .unwrap();
     key
+}
+
+pub fn benchmark_argon2() -> (u32, u32, u32) {
+    let salt = [7u8; 32];
+    let password = "benchmark-password";
+    let iterations = 3;
+    let parallelism = 1;
+    let mut memory_kb = 65_536;
+
+    loop {
+        let start = Instant::now();
+        let _ = derive_key_with_params(password, &salt, memory_kb, iterations, parallelism);
+        if start.elapsed().as_millis() >= 300 || memory_kb >= 1_048_576 {
+            break;
+        }
+        memory_kb = (memory_kb * 2).min(1_048_576);
+    }
+
+    (memory_kb, iterations, parallelism)
 }
 
 pub fn encrypt(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
@@ -113,5 +143,23 @@ mod tests {
     fn test_constant_time_compare() {
         assert!(constant_time_compare("abc", "abc"));
         assert!(!constant_time_compare("abc", "abd"));
+    }
+
+    #[test]
+    fn test_benchmark_returns_values_within_bounds() {
+        let (memory_kb, iterations, parallelism) = benchmark_argon2();
+        assert!((65_536..=1_048_576).contains(&memory_kb));
+        assert!(iterations >= 3);
+        assert!(parallelism >= 1);
+    }
+
+    #[test]
+    fn test_derive_key_with_params_roundtrip() {
+        let salt = generate_salt();
+        let nonce = generate_nonce();
+        let key = derive_key_with_params("password", &salt, 65_536, 3, 1);
+        let ciphertext = encrypt(b"secret", &key, &nonce);
+        let decrypted = decrypt(&ciphertext, &key, &nonce).unwrap();
+        assert_eq!(decrypted, b"secret");
     }
 }

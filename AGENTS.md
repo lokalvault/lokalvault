@@ -26,7 +26,7 @@ If Cursor or Copilot instruction files are added later, treat them as additional
 ## Current Phase
 
 The POC is complete and tagged `v0.0.1-poc`.
-Current work is Phase 1, and Phase 1 is intentionally CLI-first.
+Current work is the pre-Phase-1C completion pass, finishing CLI/product hardening before any UI work.
 
 POC completion is defined explicitly by one end-to-end demo only:
 
@@ -71,12 +71,13 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 | 10   | CLI          | `src/cli.rs`      | ✅ DONE |
 | 11   | Audit Log    | `src/audit_log.rs` | ✅ DONE |
 | 12   | Settings     | `src/settings.rs` | ✅ DONE  |
-| 13   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
-| 14   | React UI     | `src/`            | ⬜ PHASE 1C |
+| 13   | Phase 1C Prep | `docs/`, `src/`  | 🔄 IN PROGRESS |
+| 14   | Tauri Init   | `src-tauri/`      | ⬜ BLOCKED |
+| 15   | React UI     | `src/`            | ⬜ BLOCKED |
 
 Current next work:
 
-- Phase 1 closure pass before Phase 1C
+- Pre-Phase-1C completion groups before any Tauri/React work
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -201,7 +202,7 @@ The live codebase is smaller than the full spec.
 - `src/cli.rs`: Phase 1B CLI command surface with clap routing, IPC-first daemon access, offline fallback when no daemon is running, update/delete support, and unit/integration tests
 - `src/ipc_client.rs`: per-user Unix socket IPC helpers for daemon discovery and request/response transport
 - `src/audit_log.rs`: access-event audit logging with newline-delimited JSON storage, filters, clear support, and daemon access logging
-- `src/settings.rs`: settings persistence and nested CLI config surface with safe defaults; Argon2 tuning values are stored but not yet applied until Phase 1C crypto wiring
+- `src/settings.rs`: settings persistence and nested CLI config surface with safe defaults; runtime Argon2 and timeout wiring are part of pre-Phase-1C technical debt closure
 - Planned modules in docs such as `src/settings.rs` and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
