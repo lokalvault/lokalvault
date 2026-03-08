@@ -70,6 +70,17 @@ enum Commands {
         format: String,
     },
     Status {},
+    Audit {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        process_name: Option<String>,
+    },
+    AuditClear,
     Push {
         project: String,
         #[arg(long)]
@@ -160,6 +171,37 @@ async fn main() {
         Commands::Status {} => cli::cmd_status().map(|status| {
             println!("{status}");
         }),
+        Commands::Audit {
+            project,
+            since,
+            method,
+            process_name,
+        } => {
+            let since = match since.as_deref() {
+                Some(value) => match parse_since_flag(value) {
+                    Ok(since) => Some(since),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            cli::cmd_audit(Some(lokalvault::audit_log::AuditFilter {
+                project,
+                since,
+                method,
+                process_name,
+            }))
+            .map(|output| {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            })
+        }
+        Commands::AuditClear => cli::cmd_audit_clear().map(|message| {
+            eprintln!("{message}");
+        }),
         Commands::Push {
             project,
             target,
@@ -189,6 +231,22 @@ async fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn parse_since_flag(input: &str) -> Result<std::time::SystemTime, String> {
+    let value = input.trim();
+    if value.is_empty() {
+        return Err("since cannot be empty".to_string());
+    }
+    let Some(days) = value.strip_suffix('d') else {
+        return Err("since must use day suffix like 7d".to_string());
+    };
+    let days: u64 = days
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(days * 24 * 60 * 60))
+        .ok_or_else(|| "invalid since range".to_string())
 }
 
 #[cfg(test)]

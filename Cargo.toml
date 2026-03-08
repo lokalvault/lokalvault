@@ -19,6 +19,7 @@ tokio      = { version = "1", features = ["full"] }
 clap       = { version = "4", features = ["derive"] }
 subtle     = "2"
 rpassword  = "7"
+chrono     = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,3 +1,4 @@
+use lokalvault::audit_log::{clear_audit_log, read_audit_log};
 use lokalvault::daemon::{
     fetch_all_secrets, register_token_phase1, register_token_phase2, start_daemon,
 };
@@ -155,6 +156,63 @@ fn test_ipc_full_lifecycle() {
     }))
     .unwrap();
     assert_eq!(delete["ok"], true);
+
+    let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
+    assert_eq!(shutdown["ok"], true);
+    let _ = daemon.wait();
+}
+
+#[test]
+fn test_audit_log_records_daemon_access() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_audit_log().unwrap();
+
+    let socket = get_socket_path();
+    let _ = fs::remove_file(&socket);
+
+    let vault = VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: "my-app".to_string(),
+            secrets: vec![Secret {
+                key: "OPENAI_KEY".to_string(),
+                value: "test-value-123".to_string(),
+            }],
+        }],
+    };
+    let input = serde_json::to_vec(&(vault, "password".to_string())).unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("daemon")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    daemon.stdin.take().unwrap().write_all(&input).unwrap();
+
+    for _ in 0..50 {
+        if socket.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let response = send_ipc_request(json!({
+        "type": "get_secret",
+        "project": "my-app",
+        "key": "OPENAI_KEY",
+        "process_name": "python",
+        "exe_path": "/usr/bin/python3",
+        "method": "cli_get"
+    }))
+    .unwrap();
+    assert_eq!(response["value"], "test-value-123");
+
+    let events = read_audit_log(None).unwrap();
+    assert!(!events.is_empty());
+    assert_eq!(events[0].project, "my-app");
+    assert_eq!(events[0].key, "OPENAI_KEY");
+
+    let serialized = serde_json::to_string(&events[0]).unwrap();
+    assert!(!serialized.contains("test-value-123"));
 
     let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
     assert_eq!(shutdown["ok"], true);

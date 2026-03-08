@@ -1,3 +1,4 @@
+pub mod audit_log;
 pub mod cli;
 pub mod crypto;
 pub mod daemon;

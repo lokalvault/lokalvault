@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
+use crate::audit_log::{AccessEvent, log_access_event};
 use crate::ipc_client::get_socket_path;
 use crate::vault_file::VaultData;
 use crate::vault_ops::{
@@ -643,7 +644,31 @@ fn handle_ipc_request(
                 .get("key")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing key".to_string())?;
-            json!({ "ok": true, "value": get_secret_value(state, project, key)? })
+            let value = get_secret_value(state, project, key)?;
+            let process_name = request
+                .get("process_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let exe_path = request
+                .get("exe_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let method = request
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("cli_get")
+                .to_string();
+            log_access_event(AccessEvent {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                process_name,
+                exe_path,
+                project: project.to_string(),
+                key: key.to_string(),
+                method,
+            })?;
+            json!({ "ok": true, "value": value })
         }
         "add_secret" => {
             let project = request
@@ -729,6 +754,12 @@ fn handle_ipc_request(
             json!({ "ok": true })
         }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
+        "log_access" => {
+            let event: AccessEvent =
+                serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+            log_access_event(event)?;
+            json!({ "ok": true })
+        }
         "shutdown" => json!({ "ok": true }),
         _ => json!({ "ok": false, "error": "unsupported request type" }),
     };

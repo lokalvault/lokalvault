@@ -1,3 +1,4 @@
+use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::get_project_from_config;
 use crate::vault_file::{VaultData, get_vault_path};
@@ -45,6 +46,22 @@ pub enum PushTarget {
     Railway,
     Fly,
     Netlify,
+}
+
+fn current_process_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "lokalvault".to_string())
+}
+
+fn current_exe_path() -> String {
+    std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 pub fn prompt_password(prompt: &str) -> Result<String, String> {
@@ -276,6 +293,9 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
             "type": "get_secret",
             "project": project,
             "key": key,
+            "process_name": current_process_name(),
+            "exe_path": current_exe_path(),
+            "method": "cli_get",
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(response["value"].as_str().unwrap_or("").to_string());
@@ -446,6 +466,38 @@ pub fn cmd_status() -> Result<String, String> {
         "No vault found - run lokalvault create\nVersion: {}",
         env!("CARGO_PKG_VERSION")
     ))
+}
+
+pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, String> {
+    let events = read_audit_log(filter)?;
+    Ok(events
+        .into_iter()
+        .map(|event| {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or(event.timestamp);
+            format!(
+                "{} | {} | {} | {} | {}",
+                timestamp, event.process_name, event.project, event.key, event.method
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+pub fn cmd_audit_clear() -> Result<String, String> {
+    eprint!("Clear all audit logs? [y/N]: ");
+    io::stderr().flush().map_err(|e| e.to_string())?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| e.to_string())?;
+    if input.trim().to_lowercase() != "y" {
+        return Err("audit clear cancelled".to_string());
+    }
+
+    clear_audit_log()?;
+    Ok("✓ Cleared audit log.".to_string())
 }
 
 pub fn cmd_push(
