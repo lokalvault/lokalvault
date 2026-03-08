@@ -307,7 +307,7 @@ pub enum AppError {
 - Ready to expand as the real daemon and run flow are implemented
 
 **Current next step:**
-- Replace the POC daemon with the real vault-backed daemon next
+- Phase 1C Tauri/React setup is the next unblocked milestone
 
 ---
 

@@ -77,7 +77,8 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 
 Current next work:
 
-- Final validation, milestone commit/tag `v0.1.9-pre-phase1c-complete`, then unblock Tauri/React setup
+- Pre-Phase-1C completion pass is done and tagged `v0.1.9-pre-phase1c-complete`
+- Tauri/React setup is now unblocked as the next phase
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -198,7 +199,7 @@ The live codebase is smaller than the full spec.
 - `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, plus real terminal PIN/config/token-aware helpers and tests
 - `src/vault_ops.rs`: full CRUD and validation layer with unit tests
 - `src/errors.rs`: shared application error enum with unit tests and minimal `vault_ops` integration
-- `tests/`: integration scaffolding with `vault_roundtrip`, `poc_demo`, and `end_to_end` coverage placeholders
+- `tests/`: integration coverage with `vault_roundtrip`, `poc_demo`, and `end_to_end` including repo-protection tests
 - `src/cli.rs`: Phase 1B CLI command surface with clap routing, IPC-first daemon access, offline fallback when no daemon is running, update/delete support, AI-safe workflows, repo protection commands (`scan-diff`, `protect-repo`), and unit/integration tests
 - `src/ipc_client.rs`: per-user Unix socket IPC helpers for daemon discovery and request/response transport
 - `src/audit_log.rs`: access-event audit logging with newline-delimited JSON storage, filters, clear support, and daemon access logging
