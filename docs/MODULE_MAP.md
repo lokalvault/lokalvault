@@ -214,10 +214,10 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `cmd_status` | Show vault/daemon/session status |
 
 **Current implementation status:**
-- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_status`, and `cmd_push` implemented at an initial Phase 1B level
+- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_export`, `cmd_status`, and `cmd_push` implemented for the current Phase 1B CLI surface
 - Uses clap-based command routing from `src/main.rs`
-- Includes tests for init/config creation, project/key summary helpers, and push target command wiring
-- Still completing daemon-sync behavior, real run integration, and broader parsing/routing coverage before declaring the CLI module done
+- Preserves the Phase 1 state-sync invariant by mutating through daemon-backed state when a session is active and using offline vault writes when it is not
+- Includes tests for init/config creation, daemon-backed mutation coverage, get/export output behavior, project/key summary helpers, and push target command wiring
 
 ---
 

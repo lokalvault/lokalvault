@@ -68,7 +68,7 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 | 7    | Errors       | `src/errors.rs`   | ✅ DONE     |
 | 8    | Daemon Real  | `src/daemon.rs`   | ✅ DONE     |
 | 9    | Run Real     | `src/run_cmd.rs`  | ✅ DONE     |
-| 10   | CLI          | `src/cli.rs`      | 🔄 IN PROGRESS |
+| 10   | CLI          | `src/cli.rs`      | ✅ DONE |
 | 11   | Audit Log    | `src/audit_log.rs` | ⬜ PENDING |
 | 12   | Settings     | `src/settings.rs` | ⬜ PENDING  |
 | 13   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
@@ -76,7 +76,7 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/cli.rs` - complete the CLI behavior gaps before moving to audit logging
+- `src/audit_log.rs` - begin audit logging after closing out CLI behavior
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -198,7 +198,8 @@ The live codebase is smaller than the full spec.
 - `src/vault_ops.rs`: full CRUD and validation layer with unit tests
 - `src/errors.rs`: shared application error enum with unit tests and minimal `vault_ops` integration
 - `tests/`: integration scaffolding with `vault_roundtrip`, `poc_demo`, and `end_to_end` coverage placeholders
-- `src/cli.rs`: initial Phase 1B command surface with command routing and partial tests; still completing daemon-sync and command behavior gaps
+- `src/cli.rs`: Phase 1B CLI command surface with clap routing, offline mutations, daemon-backed add/import mutations, status/import/push helpers, and unit tests
+- Known current Phase 1C deferral: `list`, `get`, and `push` still unlock from disk for read operations instead of reusing an active daemon session; this is a UX gap, not a correctness bug. CLI tests now use deterministic password input seams instead of deleting `.gitignore` or relying on fragile terminal scripting.
 - Planned modules in docs such as `src/settings.rs` and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 

@@ -1157,7 +1157,7 @@ Phase 1A completion result in current repository snapshot:
 - integration tests prove the token-aware cross-module path
 
 ### Phase 1B — Full CLI
-- `src/cli.rs` 🔄 in progress
+- `src/cli.rs` ✅ complete for the current CLI-first Phase 1B surface
 - `src/audit_log.rs`
 - `src/settings.rs`
 

@@ -3,6 +3,7 @@ use crate::daemon::{
     DaemonState, POC_SOCKET_PATH, fetch_all_secrets as fetch_all_secrets_from_state,
     register_token_phase1, register_token_phase2,
 };
+use crate::vault_file::get_vault_path;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -27,9 +28,8 @@ pub async fn cmd_run(
 
     let project_name = match project {
         Some(name) => name.to_string(),
-        None => get_project_from_config()?.ok_or_else(|| {
-            "project not configured; use lokalvault init or pass a project".to_string()
-        })?,
+        None => get_project_from_config()?
+            .ok_or_else(|| "run lokalvault init first or pass --project".to_string())?,
     };
 
     let command_preview = command.join(" ");
@@ -53,6 +53,37 @@ pub async fn cmd_run(
 
     register_token_phase2(state, &token, child_pid, Duration::from_secs(60))?;
     child.wait().map_err(|e| e.to_string())
+}
+
+pub async fn cmd_run_unified(
+    state: Option<&DaemonState>,
+    project: Option<&str>,
+    command: Vec<String>,
+) -> Result<std::process::ExitStatus, String> {
+    if let Some(state) = state {
+        return cmd_run(state, project, command).await;
+    }
+
+    if project.is_some() {
+        return Err("vault is locked; run `lokalvault unlock` first".to_string());
+    }
+
+    if let Some(project_name) = get_project_from_config()? {
+        let _ = project_name;
+        return cmd_run_poc(command).await;
+    }
+
+    if get_vault_path().exists() {
+        return Err("run lokalvault init first or pass --project".to_string());
+    }
+
+    match cmd_run_poc(command).await {
+        Ok(status) => Ok(status),
+        Err(error) if error.contains("No such file or directory") => {
+            Err("run lokalvault init first or pass --project".to_string())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {

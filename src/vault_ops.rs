@@ -3,7 +3,7 @@ use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, 
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSummary {
     pub name: String,
     pub secret_count: usize,

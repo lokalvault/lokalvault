@@ -1,28 +1,39 @@
-use crate::daemon::{DaemonState, start_daemon, stop_daemon};
+use crate::ipc_client::{is_daemon_running, send_ipc_request};
 use crate::run_cmd::get_project_from_config;
-use crate::vault_file::get_vault_path;
+use crate::vault_file::{VaultData, get_vault_path};
 use crate::vault_ops::{
-    add_project, add_secret, create_vault, import_dotenv, list_projects, list_secret_keys,
-    unlock_vault,
+    add_project, add_secret, create_vault, delete_project, delete_secret, import_dotenv,
+    list_projects, list_secret_keys, unlock_vault, update_secret,
 };
 use rpassword::read_password;
+use serde_json::json;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
+#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-static DAEMON_SESSION: OnceLock<Mutex<Option<DaemonState>>> = OnceLock::new();
-
-fn daemon_session() -> &'static Mutex<Option<DaemonState>> {
-    DAEMON_SESSION.get_or_init(|| Mutex::new(None))
-}
+#[cfg(test)]
+static TEST_PASSWORDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 pub enum ExportFormat {
     Dotenv,
     Json,
     Eval,
+}
+
+impl ExportFormat {
+    pub fn parse(input: &str) -> Result<Self, String> {
+        match input {
+            "dotenv" => Ok(Self::Dotenv),
+            "json" => Ok(Self::Json),
+            "eval" => Ok(Self::Eval),
+            _ => Err(format!("unsupported export format: {input}")),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -35,35 +46,45 @@ pub enum PushTarget {
 }
 
 pub fn prompt_password(prompt: &str) -> Result<String, String> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(|e| e.to_string())?;
+    eprint!("{prompt}");
+    io::stderr().flush().map_err(|e| e.to_string())?;
+
+    #[cfg(test)]
+    {
+        let passwords = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut passwords = passwords.lock().map_err(|e| e.to_string())?;
+        if !passwords.is_empty() {
+            return Ok(passwords.remove(0));
+        }
+    }
+
     read_password().map_err(|e| e.to_string())
 }
 
 pub fn cmd_create() -> Result<String, String> {
     let password = prompt_password("Master password: ")?;
     create_vault(&password)?;
-    Ok(format!("✓ Vault created at {}", get_vault_path().display()))
+    Ok(format!("Vault created at {}", get_vault_path().display()))
 }
 
 pub fn cmd_unlock() -> Result<String, String> {
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password)?;
-    let state = start_daemon(vault);
-
-    let mut session = daemon_session().lock().map_err(|e| e.to_string())?;
-    *session = Some(state);
-
-    Ok("✓ Vault unlocked. Session active.".to_string())
+    spawn_detached_daemon(&vault, &password)?;
+    Ok("Vault unlocked. Daemon active.".to_string())
 }
 
 pub fn cmd_lock() -> Result<String, String> {
-    let mut session = daemon_session().lock().map_err(|e| e.to_string())?;
-    if let Some(state) = session.take() {
-        stop_daemon(&state)?;
+    if !is_daemon_running() {
+        return Ok("Vault already locked.".to_string());
     }
 
-    Ok("✓ Vault locked.".to_string())
+    let response = send_ipc_request(json!({ "type": "shutdown" }))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok("Vault locked.".to_string());
+    }
+
+    Err(response_error(&response))
 }
 
 pub fn cmd_init(project_name: Option<&str>) -> Result<String, String> {
@@ -80,31 +101,156 @@ pub fn cmd_init(project_name: Option<&str>) -> Result<String, String> {
 
     let contents = format!("[project]\nname = \"{name}\"\n");
     fs::write(".lokalvault", contents).map_err(|e| e.to_string())?;
-    Ok("✓ Created .lokalvault".to_string())
+    Ok("Created .lokalvault".to_string())
 }
 
-pub fn cmd_add(project: &str, key: &str, value: Option<&str>) -> Result<String, String> {
-    let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
+pub fn cmd_add(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
+    let project = resolve_project(project)?;
     let secret_value = match value {
         Some(value) => value.to_string(),
         None => prompt_password("Secret value: ")?,
     };
 
-    if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, project)?;
+    if is_daemon_running() {
+        let password = prompt_password("Master password: ")?;
+        let response = send_ipc_request(json!({
+            "type": "add_secret",
+            "project": project,
+            "key": key,
+            "value": secret_value,
+            "password": password,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(format!("Added {key} to {project}"));
+        }
+        return Err(response_error(&response));
     }
-    add_secret(&mut vault, project, key, &secret_value)?;
-    crate::vault_ops::change_master_password(&vault, &password, &password)?;
 
-    Ok(format!("✓ Added {key} to {project}"))
+    let password = prompt_password("Master password: ")?;
+    let mut vault = unlock_vault(&password)?;
+    if !vault.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut vault, &project)?;
+    }
+    add_secret(&mut vault, &project, key, &secret_value)?;
+    crate::vault_file::write_vault(&vault, &password)?;
+    Ok(format!("Added {key} to {project}"))
+}
+
+pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    let secret_value = match value {
+        Some(value) => value.to_string(),
+        None => prompt_password("Secret value: ")?,
+    };
+
+    if is_daemon_running() {
+        let password = prompt_password("Master password: ")?;
+        let response = send_ipc_request(json!({
+            "type": "update_secret",
+            "project": project,
+            "key": key,
+            "value": secret_value,
+            "password": password,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(format!("Updated {key} in {project}"));
+        }
+        return Err(response_error(&response));
+    }
+
+    let password = prompt_password("Master password: ")?;
+    let mut vault = unlock_vault(&password)?;
+    update_secret(&mut vault, &project, key, &secret_value)?;
+    crate::vault_file::write_vault(&vault, &password)?;
+    Ok(format!("Updated {key} in {project}"))
+}
+
+pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
+    let project = resolve_project(project)?;
+
+    if is_daemon_running() {
+        let password = prompt_password("Master password: ")?;
+        let response = send_ipc_request(json!({
+            "type": "delete_secret",
+            "project": project,
+            "key": key,
+            "password": password,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(format!("Deleted {key} from {project}"));
+        }
+        return Err(response_error(&response));
+    }
+
+    let password = prompt_password("Master password: ")?;
+    let mut vault = unlock_vault(&password)?;
+    delete_secret(&mut vault, &project, key)?;
+    crate::vault_file::write_vault(&vault, &password)?;
+    Ok(format!("Deleted {key} from {project}"))
+}
+
+pub fn cmd_delete_project(project: &str) -> Result<String, String> {
+    if is_daemon_running() {
+        let password = prompt_password("Master password: ")?;
+        let response = send_ipc_request(json!({
+            "type": "delete_project",
+            "project": project,
+            "password": password,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(format!("Deleted project {project}"));
+        }
+        return Err(response_error(&response));
+    }
+
+    let password = prompt_password("Master password: ")?;
+    let mut vault = unlock_vault(&password)?;
+    delete_project(&mut vault, project)?;
+    crate::vault_file::write_vault(&vault, &password)?;
+    Ok(format!("Deleted project {project}"))
 }
 
 pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
+    let project = match project {
+        Some(project) => Some(resolve_project(Some(project))?),
+        None => None,
+    };
+
+    if is_daemon_running() {
+        let response = match project.as_deref() {
+            Some(project) => send_ipc_request(json!({ "type": "list_keys", "project": project }))?,
+            None => send_ipc_request(json!({ "type": "list_projects" }))?,
+        };
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        return match project {
+            Some(_) => Ok(response["keys"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")),
+            None => Ok(response["projects"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} ({})",
+                        entry["name"].as_str().unwrap_or(""),
+                        entry["secret_count"].as_u64().unwrap_or(0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")),
+        };
+    }
+
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password)?;
-
-    match project {
+    match project.as_deref() {
         Some(project) => Ok(list_secret_keys(&vault, project)?.join("\n")),
         None => Ok(list_projects(&vault)
             .into_iter()
@@ -114,34 +260,46 @@ pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
     }
 }
 
-pub fn cmd_get(project: &str, key: &str) -> Result<String, String> {
+pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
+    let project = resolve_project(project)?;
+
+    if is_daemon_running() {
+        let response = send_ipc_request(json!({
+            "type": "get_secret",
+            "project": project,
+            "key": key,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(response["value"].as_str().unwrap_or("").to_string());
+        }
+        return Err(response_error(&response));
+    }
+
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password)?;
-    let project = vault
+    let project_entry = vault
         .projects
         .iter()
         .find(|entry| entry.name == project)
         .ok_or_else(|| format!("project not found: {project}"))?;
-    let secret = project
+    let secret = project_entry
         .secrets
         .iter()
         .find(|entry| entry.key == key)
         .ok_or_else(|| format!("secret not found: {key}"))?;
-
     Ok(secret.value.clone())
 }
 
 pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
-    let password = prompt_password("Master password: ")?;
     let preview = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let keys = preview
         .lines()
         .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim().to_string()))
         .collect::<Vec<_>>();
 
-    println!("Importing keys: {}", keys.join(", "));
-    print!("Proceed? [y/N]: ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
+    eprintln!("Importing keys: {}", keys.join(", "));
+    eprint!("Proceed? [y/N]: ");
+    io::stderr().flush().map_err(|e| e.to_string())?;
     let mut input = String::new();
     io::stdin()
         .read_line(&mut input)
@@ -150,76 +308,280 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
         return Err("import cancelled".to_string());
     }
 
+    if is_daemon_running() {
+        let password = prompt_password("Master password: ")?;
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+        for raw_line in preview.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                skipped += 1;
+                continue;
+            };
+            let response = send_ipc_request(json!({
+                "type": "add_secret",
+                "project": project,
+                "key": key.trim(),
+                "value": value.trim(),
+                "password": password,
+            }))?;
+            if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+                imported += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        let retired_path = retire_import_file(path)?;
+        ensure_gitignore_contains(&retired_path)?;
+        return Ok(format!(
+            "Imported {} secrets into {} (skipped {}) - retired to {}",
+            imported,
+            project,
+            skipped,
+            retired_path.display()
+        ));
+    }
+
+    let password = prompt_password("Master password: ")?;
     let mut vault = unlock_vault(&password)?;
     if !vault.projects.iter().any(|entry| entry.name == project) {
         add_project(&mut vault, project)?;
     }
     let result = import_dotenv(&mut vault, project, path)?;
-    crate::vault_ops::change_master_password(&vault, &password, &password)?;
-
+    crate::vault_file::write_vault(&vault, &password)?;
+    let retired_path = retire_import_file(path)?;
+    ensure_gitignore_contains(&retired_path)?;
     Ok(format!(
-        "✓ Imported {} secrets into {} (skipped {})",
-        result.imported, project, result.skipped
+        "Imported {} secrets into {} (skipped {}) - retired to {}",
+        result.imported,
+        project,
+        result.skipped,
+        retired_path.display()
     ))
 }
 
-pub fn cmd_status() -> Result<String, String> {
-    let vault_exists = get_vault_path().exists();
-    let daemon_running = daemon_session()
-        .lock()
-        .map_err(|e| e.to_string())?
-        .is_some();
-    let project_hint = get_project_from_config()?.unwrap_or_else(|| "not configured".to_string());
-    let project_count = if vault_exists {
-        prompt_password("Master password (for project count, leave empty to skip): ")
-            .ok()
-            .and_then(|password| {
-                if password.is_empty() {
-                    None
-                } else {
-                    unlock_vault(&password)
-                        .ok()
-                        .map(|vault| vault.projects.len())
-                }
-            })
-            .unwrap_or(0)
+pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    eprintln!("Secrets now in shell. Clear with: unset KEY");
+
+    let secrets = if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        response["secrets"].as_object().cloned().unwrap_or_default()
     } else {
-        0
+        let password = prompt_password("Master password: ")?;
+        let vault = unlock_vault(&password)?;
+        let project_entry = vault
+            .projects
+            .iter()
+            .find(|entry| entry.name == project)
+            .ok_or_else(|| format!("project not found: {project}"))?;
+        project_entry
+            .secrets
+            .iter()
+            .map(|secret| {
+                (
+                    secret.key.clone(),
+                    serde_json::Value::String(secret.value.clone()),
+                )
+            })
+            .collect()
     };
 
+    match format {
+        ExportFormat::Dotenv => Ok(secrets
+            .iter()
+            .map(|(key, value)| format!("{}={}", key, value.as_str().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        ExportFormat::Json => serde_json::to_string(&secrets).map_err(|e| e.to_string()),
+        ExportFormat::Eval => Ok(secrets
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "export {}={}",
+                    key,
+                    shell_quote(value.as_str().unwrap_or(""))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")),
+    }
+}
+
+pub fn cmd_status() -> Result<String, String> {
+    if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "project_count" }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(format!(
+                "Vault: unlocked\nProjects: {}\nVersion: {}",
+                response["count"].as_u64().unwrap_or(0),
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        return Err(response_error(&response));
+    }
+
+    if get_vault_path().exists() {
+        return Ok(format!(
+            "Vault locked - run lokalvault unlock to see details\nVersion: {}",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
     Ok(format!(
-        "Vault: {} ({})\nDaemon: {}\nProject: {}\nProjects: {}\nVersion: {}",
-        get_vault_path().display(),
-        if vault_exists { "exists" } else { "missing" },
-        if daemon_running { "running" } else { "stopped" },
-        project_hint,
-        project_count,
+        "No vault found - run lokalvault create\nVersion: {}",
         env!("CARGO_PKG_VERSION")
     ))
 }
 
-pub fn cmd_push(project: &str, target: PushTarget) -> Result<String, String> {
-    let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password)?;
-    let project = vault
-        .projects
-        .iter()
-        .find(|entry| entry.name == project)
-        .ok_or_else(|| format!("project not found: {project}"))?;
+pub fn cmd_push(
+    project: &str,
+    target: PushTarget,
+    environment: Option<&str>,
+) -> Result<String, String> {
+    let environment = environment.unwrap_or("production");
+    let secrets = if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        response["secrets"].as_object().cloned().unwrap_or_default()
+    } else {
+        let password = prompt_password("Master password: ")?;
+        let vault = unlock_vault(&password)?;
+        let project_entry = vault
+            .projects
+            .iter()
+            .find(|entry| entry.name == project)
+            .ok_or_else(|| format!("project not found: {project}"))?;
+        project_entry
+            .secrets
+            .iter()
+            .map(|secret| {
+                (
+                    secret.key.clone(),
+                    serde_json::Value::String(secret.value.clone()),
+                )
+            })
+            .collect()
+    };
 
-    for secret in &project.secrets {
-        let mut cmd = platform_command(target, &secret.key, &secret.value);
-        let _ = cmd.status().map_err(|e| e.to_string())?;
+    if !matches!(target, PushTarget::Vercel) && environment != "production" {
+        eprintln!("Warning: --env ignored for {}", push_target_name(target));
+    }
+
+    for (key, value) in &secrets {
+        eprintln!("Pushing {} to {}...", key, push_target_name(target));
+        let mut cmd = platform_command(target, key, value.as_str().unwrap_or(""), environment);
+        cmd.status().map_err(|e| {
+            format!(
+                "{} CLI not found or failed to run: {}",
+                push_target_name(target),
+                e
+            )
+        })?;
     }
 
     Ok(format!(
         "Pushing {} secrets to {}...",
-        project.secrets.len(),
+        secrets.len(),
         push_target_name(target)
     ))
 }
 
-fn platform_command(target: PushTarget, key: &str, value: &str) -> Command {
+fn resolve_project(project: Option<&str>) -> Result<String, String> {
+    match project {
+        Some(project) => Ok(project.to_string()),
+        None => get_project_from_config()?
+            .ok_or_else(|| "run lokalvault init first or pass --project".to_string()),
+    }
+}
+
+fn response_error(response: &serde_json::Value) -> String {
+    response
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown daemon error")
+        .to_string()
+}
+
+fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String> {
+    let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .arg("daemon")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(unix)]
+    unsafe {
+        libc::setsid();
+    }
+
+    let payload = serde_json::to_vec(&(vault, password)).map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "failed to open daemon stdin".to_string())?
+        .write_all(&payload)
+        .map_err(|e| e.to_string())?;
+
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        if is_daemon_running() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err("daemon failed to start".to_string())
+}
+
+fn retire_import_file(path: &Path) -> Result<std::path::PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "import path must point to a file".to_string())?
+        .to_string_lossy();
+    let retired_name = format!("{file_name}.retired");
+    let retired_path = path.with_file_name(retired_name);
+    fs::rename(path, &retired_path).map_err(|e| e.to_string())?;
+    Ok(retired_path)
+}
+
+fn ensure_gitignore_contains(retired_path: &Path) -> Result<(), String> {
+    let ignore_path = Path::new(".gitignore");
+    let retired_name = retired_path
+        .file_name()
+        .ok_or_else(|| "retired path must point to a file".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let mut contents = if ignore_path.exists() {
+        fs::read_to_string(ignore_path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+
+    if !contents.lines().any(|line| line.trim() == retired_name) {
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(&retired_name);
+        contents.push('\n');
+        fs::write(ignore_path, contents).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn platform_command(target: PushTarget, key: &str, value: &str, environment: &str) -> Command {
     let mut cmd = match target {
         PushTarget::Vercel => Command::new("vercel"),
         PushTarget::Render => Command::new("render"),
@@ -230,7 +592,7 @@ fn platform_command(target: PushTarget, key: &str, value: &str) -> Command {
 
     match target {
         PushTarget::Vercel => {
-            cmd.args(["env", "add", key, value]);
+            cmd.args(["env", "add", key, value, environment]);
         }
         PushTarget::Render => {
             cmd.args(["envvar", "set", &format!("{key}={value}")]);
@@ -259,93 +621,15 @@ fn push_target_name(target: PushTarget) -> &'static str {
     }
 }
 
-pub fn summarize_projects(password: &str) -> Result<Vec<crate::vault_ops::ProjectSummary>, String> {
-    let vault = unlock_vault(password)?;
-    Ok(list_projects(&vault))
-}
-
-pub fn summarize_project_keys(password: &str, project: &str) -> Result<Vec<String>, String> {
-    let vault = unlock_vault(password)?;
-    list_secret_keys(&vault, project)
+fn shell_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::vault_file::{Project, Secret, VaultData, get_vault_path};
-    use std::sync::Mutex;
-
-    static CLI_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn cleanup() {
-        let _ = fs::remove_file(".lokalvault");
-        let _ = fs::remove_file(get_vault_path());
-        let _ = fs::remove_file(get_vault_path().with_extension("lv.tmp"));
-        let _ = fs::remove_file(Path::new("cli.env"));
-    }
-
-    fn sample_vault() -> VaultData {
-        VaultData {
-            version: 1,
-            projects: vec![Project {
-                name: "my-app".to_string(),
-                secrets: vec![
-                    Secret {
-                        key: "OPENAI_KEY".to_string(),
-                        value: "test-value-123".to_string(),
-                    },
-                    Secret {
-                        key: "DATABASE_URL".to_string(),
-                        value: "postgres://db".to_string(),
-                    },
-                ],
-            }],
-        }
-    }
-
-    #[test]
-    fn test_cmd_init_creates_config_file() {
-        let _guard = CLI_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
-
-        let message = cmd_init(Some("my-app")).unwrap();
-        let config = fs::read_to_string(".lokalvault").unwrap();
-
-        assert_eq!(message, "✓ Created .lokalvault");
-        assert!(config.contains("name = \"my-app\""));
-        cleanup();
-    }
-
-    #[test]
-    fn test_summarize_projects_and_keys() {
-        let _guard = CLI_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
-
-        let vault = sample_vault();
-        let projects = crate::vault_ops::list_projects(&vault);
-        let keys = crate::vault_ops::list_secret_keys(&vault, "my-app").unwrap();
-
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].name, "my-app");
-        assert_eq!(projects[0].secret_count, 2);
-        assert_eq!(keys.len(), 2);
-        cleanup();
-    }
-
-    #[test]
-    fn test_platform_command_builds_expected_args() {
-        let cmd = platform_command(PushTarget::Railway, "OPENAI_KEY", "value");
-        let args = cmd
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect::<Vec<_>>();
-
-        assert_eq!(args, vec!["variables", "set", "OPENAI_KEY=value"]);
-    }
-
-    #[test]
-    fn test_push_target_name_matches_expected_strings() {
-        assert_eq!(push_target_name(PushTarget::Vercel), "vercel");
-        assert_eq!(push_target_name(PushTarget::Netlify), "netlify");
-    }
+pub fn push_test_passwords(passwords: &[&str]) {
+    let queue = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
+    queue.clear();
+    queue.extend(passwords.iter().map(|password| (*password).to_string()));
 }

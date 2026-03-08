@@ -16,7 +16,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
 
+use crate::ipc_client::get_socket_path;
 use crate::vault_file::VaultData;
+use crate::vault_ops::{
+    ProjectSummary, add_project, add_secret, delete_project, delete_secret, import_dotenv,
+    list_projects, list_secret_keys, update_secret,
+};
 
 pub const POC_SOCKET_PATH: &str = "/tmp/lokalvault-test.sock";
 const PHASE1_PENDING_WINDOW: Duration = Duration::from_millis(1000);
@@ -127,8 +132,36 @@ pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
     create_socket_at_path(PathBuf::from(POC_SOCKET_PATH))
 }
 
+pub fn create_user_socket() -> Result<(PathBuf, UnixListener), String> {
+    create_socket_at_path(get_socket_path())
+}
+
 pub async fn run_daemon_poc() -> Result<(), String> {
     run_daemon_poc_at_path(PathBuf::from(POC_SOCKET_PATH)).await
+}
+
+pub async fn run_daemon_server(vault_data: VaultData) -> Result<(), String> {
+    let (socket_path, listener) = create_user_socket()?;
+    run_daemon_server_with_listener(vault_data, socket_path, listener).await
+}
+
+async fn run_daemon_server_with_listener(
+    vault_data: VaultData,
+    socket_path: PathBuf,
+    listener: UnixListener,
+) -> Result<(), String> {
+    let state = start_daemon(vault_data);
+
+    let result: Result<(), String> = async {
+        loop {
+            let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+            handle_connection(&state, &mut stream).await?;
+        }
+    }
+    .await;
+
+    let cleanup_result = cleanup_socket_file(&socket_path);
+    result.and(cleanup_result)
 }
 
 pub fn start_daemon(vault_data: VaultData) -> DaemonState {
@@ -157,13 +190,27 @@ pub fn stop_daemon(state: &DaemonState) -> Result<(), String> {
 
 pub async fn run_daemon_poc_at_path(socket_path: PathBuf) -> Result<(), String> {
     let (socket_path, listener) = create_socket_at_path(socket_path)?;
+    run_poc_server_with_listener(socket_path, listener).await
+}
 
+async fn run_poc_server_with_listener(
+    socket_path: PathBuf,
+    listener: UnixListener,
+) -> Result<(), String> {
     let result = async {
         let (mut stream, _) = listener
             .accept()
             .await
             .map_err(|e| DaemonError::Io(e.to_string()).message())?;
-        handle_connection(&mut stream).await?;
+        if let Err(error) = handle_poc_connection(&mut stream).await {
+            let response = json!({ "error": error }).to_string();
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream.shutdown().await.map_err(|e| e.to_string())?;
+            return Err(error);
+        }
         Ok(())
     }
     .await;
@@ -260,6 +307,137 @@ pub fn fetch_all_secrets(
         .iter()
         .map(|secret| (secret.key.clone(), secret.value.clone()))
         .collect())
+}
+
+pub fn upsert_secret(
+    state: &DaemonState,
+    password: &str,
+    project: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+
+    if !vault.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut vault, project)?;
+    }
+
+    match add_secret(&mut vault, project, key, value) {
+        Ok(()) => {}
+        Err(error) if error.contains("already exists") => {
+            let project_data = vault
+                .projects
+                .iter_mut()
+                .find(|entry| entry.name == project)
+                .ok_or_else(|| format!("project not found: {project}"))?;
+            let secret = project_data
+                .secrets
+                .iter_mut()
+                .find(|entry| entry.key == key)
+                .ok_or_else(|| format!("secret not found: {key}"))?;
+            secret.value = value.to_string();
+        }
+        Err(error) => return Err(error),
+    }
+
+    crate::vault_file::write_vault(&vault, password)
+}
+
+pub fn import_dotenv_into_state(
+    state: &DaemonState,
+    password: &str,
+    project: &str,
+    path: &Path,
+) -> Result<crate::vault_ops::ImportResult, String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+
+    if !vault.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut vault, project)?;
+    }
+
+    let result = import_dotenv(&mut vault, project, path)?;
+    crate::vault_file::write_vault(&vault, password)?;
+    Ok(result)
+}
+
+pub fn project_count(state: &DaemonState) -> Result<usize, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    Ok(vault.projects.len())
+}
+
+pub fn get_secret_value(state: &DaemonState, project: &str, key: &str) -> Result<String, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let project = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .ok_or_else(|| format!("project not found: {project}"))?;
+    let secret = project
+        .secrets
+        .iter()
+        .find(|entry| entry.key == key)
+        .ok_or_else(|| format!("secret not found: {key}"))?;
+    Ok(secret.value.clone())
+}
+
+pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    Ok(list_projects(&vault))
+}
+
+pub fn list_project_keys(state: &DaemonState, project: &str) -> Result<Vec<String>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    list_secret_keys(&vault, project)
+}
+
+pub fn get_all_project_secrets(
+    state: &DaemonState,
+    project: &str,
+) -> Result<HashMap<String, String>, String> {
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let project = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .ok_or_else(|| format!("project not found: {project}"))?;
+    Ok(project
+        .secrets
+        .iter()
+        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .collect())
+}
+
+pub fn delete_secret_from_state(
+    state: &DaemonState,
+    password: &str,
+    project: &str,
+    key: &str,
+) -> Result<(), String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    delete_secret(&mut vault, project, key)?;
+    crate::vault_file::write_vault(&vault, password)
+}
+
+pub fn delete_project_from_state(
+    state: &DaemonState,
+    password: &str,
+    project: &str,
+) -> Result<(), String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    delete_project(&mut vault, project)?;
+    crate::vault_file::write_vault(&vault, password)
+}
+
+pub fn update_secret_in_state(
+    state: &DaemonState,
+    password: &str,
+    project: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    update_secret(&mut vault, project, key, value)?;
+    crate::vault_file::write_vault(&vault, password)
 }
 
 pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> TokenValidation {
@@ -427,14 +605,127 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
     stream.shutdown().await.map_err(|e| e.to_string())
 }
 
-async fn handle_connection(stream: &mut UnixStream) -> Result<(), String> {
-    match handle_poc_connection(stream).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            write_error_response(stream, &error).await?;
-            Err(error)
+async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Result<(), String> {
+    let request = read_json_request(stream).await.map_err(|e| e.message())?;
+    let response = handle_ipc_request(state, &request)?;
+    let mut payload = serde_json::to_string(&response).map_err(|e| e.to_string())?;
+    payload.push('\n');
+    stream
+        .write_all(payload.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.shutdown().await.map_err(|e| e.to_string())
+}
+
+fn handle_ipc_request(
+    state: &DaemonState,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let request_type = request
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing request type".to_string())?;
+
+    let response = match request_type {
+        "get_secret" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let key = request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing key".to_string())?;
+            json!({ "ok": true, "value": get_secret_value(state, project, key)? })
         }
-    }
+        "add_secret" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let key = request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing key".to_string())?;
+            let value = request
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing value".to_string())?;
+            let password = request
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing password".to_string())?;
+            upsert_secret(state, password, project, key, value)?;
+            json!({ "ok": true })
+        }
+        "update_secret" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let key = request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing key".to_string())?;
+            let value = request
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing value".to_string())?;
+            let password = request
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing password".to_string())?;
+            update_secret_in_state(state, password, project, key, value)?;
+            json!({ "ok": true })
+        }
+        "list_projects" => json!({ "ok": true, "projects": list_project_summaries(state)? }),
+        "list_keys" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            json!({ "ok": true, "keys": list_project_keys(state, project)? })
+        }
+        "get_all_secrets" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            json!({ "ok": true, "secrets": get_all_project_secrets(state, project)? })
+        }
+        "delete_secret" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let key = request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing key".to_string())?;
+            let password = request
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing password".to_string())?;
+            delete_secret_from_state(state, password, project, key)?;
+            json!({ "ok": true })
+        }
+        "delete_project" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let password = request
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing password".to_string())?;
+            delete_project_from_state(state, password, project)?;
+            json!({ "ok": true })
+        }
+        "project_count" => json!({ "ok": true, "count": project_count(state)? }),
+        _ => json!({ "ok": false, "error": "unsupported request type" }),
+    };
+
+    Ok(response)
 }
 
 fn read_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials, DaemonError> {
@@ -509,15 +800,6 @@ fn route_poc_request(request: PocRequest) -> Result<String, DaemonError> {
             Ok(json!({ "value": "test-value-123" }).to_string())
         }
     }
-}
-
-async fn write_error_response(stream: &mut UnixStream, error: &str) -> Result<(), String> {
-    let response = json!({ "error": error }).to_string();
-    stream
-        .write_all(response.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    stream.shutdown().await.map_err(|e| e.to_string())
 }
 
 async fn read_json_request(stream: &mut UnixStream) -> Result<serde_json::Value, DaemonError> {
@@ -704,6 +986,32 @@ mod tests {
         assert!(disable_core_dumps().is_ok());
         assert!(lock_memory_pages().is_ok());
         assert!(check_rate_limit(123).is_ok());
+    }
+
+    #[test]
+    fn test_upsert_secret_updates_daemon_state_before_persist_result() {
+        let state = sample_daemon_state();
+
+        let _ = upsert_secret(
+            &state,
+            "wrong-password",
+            "my-app",
+            "OPENAI_KEY",
+            "updated-value",
+        );
+
+        let vault = state.vault.lock().unwrap();
+        let project = vault
+            .projects
+            .iter()
+            .find(|entry| entry.name == "my-app")
+            .unwrap();
+        let secret = project
+            .secrets
+            .iter()
+            .find(|entry| entry.key == "OPENAI_KEY")
+            .unwrap();
+        assert_eq!(secret.value, "updated-value");
     }
 
     #[cfg(target_os = "linux")]
