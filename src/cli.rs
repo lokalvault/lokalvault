@@ -1,4 +1,5 @@
 use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
+use crate::daemon::find_matching_secret_keys;
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::{
     ProjectConfig, get_project_from_config, read_project_config, write_project_config,
@@ -14,6 +15,8 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -920,6 +923,84 @@ pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
     Ok(format!("✓ Imported {imported} secrets into {project_name}"))
 }
 
+pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    let matches = if is_daemon_running() {
+        let response = send_ipc_request(json!({
+            "type": "scan_diff",
+            "project": project,
+            "diff": diff,
+        }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        response["matches"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        let password = prompt_password("Master password: ")?;
+        let vault = unlock_vault(&password)?;
+        let project_entry = vault
+            .projects
+            .iter()
+            .find(|entry| entry.name == project)
+            .ok_or_else(|| format!("project not found: {project}"))?;
+        let secrets = project_entry
+            .secrets
+            .iter()
+            .map(|secret| (secret.key.clone(), secret.value.clone()))
+            .collect();
+        find_matching_secret_keys(diff, &secrets)
+    };
+
+    if matches.is_empty() {
+        return Ok("No secret values detected in staged diff".to_string());
+    }
+
+    Err(format!(
+        "Blocked: staged diff contains secret values for keys: {}",
+        matches.join(", ")
+    ))
+}
+
+pub fn cmd_protect_repo(project: Option<&str>) -> Result<String, String> {
+    let hook_path = git_hook_path()?;
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
+        if !is_lokalvault_managed_hook(&existing) {
+            return Err(format!(
+                "refusing to overwrite existing non-LokalVault hook at {}",
+                hook_path.display()
+            ));
+        }
+    }
+
+    let project_arg = match project {
+        Some(name) => format!(" --project {}", shell_quote(name)),
+        None => String::new(),
+    };
+    let hook = format!(
+        "#!/bin/sh\n# lokalvault-managed\nset -eu\n\nif ! command -v lokalvault >/dev/null 2>&1; then\n  echo \"lokalvault not found in PATH; skipping secret scan\" >&2\n  exit 0\nfi\n\ngit diff --cached --no-color | lokalvault scan-diff{project_arg}\n"
+    );
+
+    if let Some(parent) = hook_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&hook_path, hook).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+        .map_err(|e| e.to_string())?;
+
+    Ok(format!(
+        "✓ Installed pre-commit hook at {}",
+        hook_path.display()
+    ))
+}
+
 fn resolve_project(project: Option<&str>) -> Result<String, String> {
     match project {
         Some(project) => Ok(project.to_string()),
@@ -927,6 +1008,20 @@ fn resolve_project(project: Option<&str>) -> Result<String, String> {
             "no project specified - run lokalvault init or pass --project".to_string()
         }),
     }
+}
+
+fn git_hook_path() -> Result<std::path::PathBuf, String> {
+    let git_dir = Path::new(".git");
+    if !git_dir.exists() || !git_dir.is_dir() {
+        return Err("not a git repository (missing .git directory)".to_string());
+    }
+    Ok(git_dir.join("hooks").join("pre-commit"))
+}
+
+fn is_lokalvault_managed_hook(contents: &str) -> bool {
+    contents
+        .lines()
+        .any(|line| line.trim() == "# lokalvault-managed")
 }
 
 fn response_error(response: &serde_json::Value) -> String {

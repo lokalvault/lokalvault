@@ -103,6 +103,14 @@ enum Commands {
         #[arg(long)]
         project: Option<String>,
     },
+    ProtectRepo {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    ScanDiff {
+        #[arg(long)]
+        project: Option<String>,
+    },
     Completion {
         shell: String,
     },
@@ -259,6 +267,22 @@ async fn main() {
         Commands::Claim { file, project } => {
             cli::cmd_claim(std::path::Path::new(&file), project.as_deref()).map(|message| {
                 eprintln!("{message}");
+            })
+        }
+        Commands::ProtectRepo { project } => {
+            cli::cmd_protect_repo(project.as_deref()).map(|message| {
+                eprintln!("{message}");
+            })
+        }
+        Commands::ScanDiff { project } => {
+            let mut diff = String::new();
+            if let Err(error) = std::io::stdin().read_to_string(&mut diff) {
+                return eprintln!("{}", error);
+            }
+            cli::cmd_scan_diff(project.as_deref(), &diff).map(|message| {
+                if !message.is_empty() {
+                    println!("{message}");
+                }
             })
         }
         Commands::Completion { shell } => {

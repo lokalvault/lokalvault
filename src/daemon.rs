@@ -415,6 +415,26 @@ pub fn get_all_project_secrets(
         .collect())
 }
 
+pub fn scan_diff_for_project(
+    state: &DaemonState,
+    project: &str,
+    diff: &str,
+) -> Result<Vec<String>, String> {
+    let secrets = get_all_project_secrets(state, project)?;
+    Ok(find_matching_secret_keys(diff, &secrets))
+}
+
+pub fn find_matching_secret_keys(diff: &str, secrets: &HashMap<String, String>) -> Vec<String> {
+    let mut matches = secrets
+        .iter()
+        .filter(|(_, value)| !value.is_empty() && value.len() >= 8 && diff.contains(value.as_str()))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    matches
+}
+
 pub fn delete_secret_from_state(
     state: &DaemonState,
     password: &str,
@@ -818,6 +838,22 @@ fn handle_ipc_request(
             let secrets = fetch_all_secrets(state, token, pid, uid).map_err(|e| e.message())?;
             json!({ "ok": true, "secrets": secrets })
         }
+        "scan_diff" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            let diff = request
+                .get("diff")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing diff".to_string())?;
+            let matches = scan_diff_for_project(state, project, diff)?;
+            json!({
+                "ok": true,
+                "blocked": !matches.is_empty(),
+                "matches": matches,
+            })
+        }
         "log_access" => {
             let event: AccessEvent =
                 serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
@@ -1117,6 +1153,54 @@ mod tests {
             .find(|entry| entry.key == "OPENAI_KEY")
             .unwrap();
         assert_eq!(secret.value, "updated-value");
+    }
+
+    #[test]
+    fn test_find_matching_secret_keys_detects_secret_value_in_diff() {
+        let secrets = HashMap::from([("OPENAI_KEY".to_string(), "test-value-123".to_string())]);
+
+        let matches = find_matching_secret_keys("+ OPENAI_KEY=test-value-123", &secrets);
+
+        assert_eq!(matches, vec!["OPENAI_KEY".to_string()]);
+    }
+
+    #[test]
+    fn test_find_matching_secret_keys_ignores_key_names() {
+        let secrets = HashMap::from([("OPENAI_KEY".to_string(), "test-value-123".to_string())]);
+
+        let matches = find_matching_secret_keys("+ OPENAI_KEY=REDACTED", &secrets);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_matching_secret_keys_ignores_short_values() {
+        let secrets = HashMap::from([("PIN".to_string(), "1234567".to_string())]);
+
+        let matches = find_matching_secret_keys("+ PIN=1234567", &secrets);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_matching_secret_keys_ignores_empty_values() {
+        let secrets = HashMap::from([("EMPTY_SECRET".to_string(), String::new())]);
+
+        let matches = find_matching_secret_keys("+ EMPTY_SECRET=", &secrets);
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_find_matching_secret_keys_deduplicates_matches() {
+        let secrets = HashMap::from([("OPENAI_KEY".to_string(), "test-value-123".to_string())]);
+
+        let matches = find_matching_secret_keys(
+            "+ OPENAI_KEY=test-value-123\n+ AGAIN=test-value-123",
+            &secrets,
+        );
+
+        assert_eq!(matches, vec!["OPENAI_KEY".to_string()]);
     }
 
     #[cfg(target_os = "linux")]

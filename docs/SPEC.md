@@ -88,6 +88,22 @@ just to push to Vercel. That collapses the entire security model.
 
 ---
 
+### ADDED: Repo protection commands before UI
+**Why:** AI-safe mode reduces accidental exposure inside the repo, but it
+does not stop a staged commit from containing a real secret value. Group 4
+adds `lokalvault scan-diff` and `lokalvault protect-repo` so the CLI can
+block commits when staged patch text contains stored secret values.
+
+**How it works:**
+- `lokalvault scan-diff` reads staged diff text from stdin
+- It compares diff text against project secret values, not key names
+- Empty values and values shorter than 8 chars are ignored
+- It prints matching key names only and exits nonzero on detection
+- `lokalvault protect-repo` installs a LokalVault-managed pre-commit hook
+- Existing non-LokalVault hooks are not overwritten automatically
+
+---
+
 # PART 1 — WHAT LOKALVAULT IS
 
 ## The Problem

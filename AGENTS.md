@@ -71,13 +71,13 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 | 10   | CLI          | `src/cli.rs`      | ✅ DONE |
 | 11   | Audit Log    | `src/audit_log.rs` | ✅ DONE |
 | 12   | Settings     | `src/settings.rs` | ✅ DONE  |
-| 13   | Phase 1C Prep | `docs/`, `src/`  | 🔄 IN PROGRESS |
+| 13   | Phase 1C Prep | `docs/`, `src/`  | ✅ DONE |
 | 14   | Tauri Init   | `src-tauri/`      | ⬜ BLOCKED |
 | 15   | React UI     | `src/`            | ⬜ BLOCKED |
 
 Current next work:
 
-- Group 4 repo protection before any Tauri/React work
+- Final validation, milestone commit/tag `v0.1.9-pre-phase1c-complete`, then unblock Tauri/React setup
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -191,15 +191,15 @@ If you touch crypto, vault format, daemon IPC, or token flow, prefer full-suite 
 
 The live codebase is smaller than the full spec.
 
-- `src/main.rs`: clap CLI entrypoint for `daemon-poc` and `run`
+- `src/main.rs`: clap CLI entrypoint for daemon, run, developer workflow, AI-safe, repo protection, and config commands
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
-- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, placeholder PID enforcement for Linux requests, explicit internal daemon error variants, structured JSON error responses, plus real daemon token/state groundwork and tests
+- `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, placeholder PID enforcement for Linux requests, explicit internal daemon error variants, structured JSON error responses, real daemon token/state groundwork, and repo-protection diff scanning helpers/tests
 - `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, plus real terminal PIN/config/token-aware helpers and tests
 - `src/vault_ops.rs`: full CRUD and validation layer with unit tests
 - `src/errors.rs`: shared application error enum with unit tests and minimal `vault_ops` integration
 - `tests/`: integration scaffolding with `vault_roundtrip`, `poc_demo`, and `end_to_end` coverage placeholders
-- `src/cli.rs`: Phase 1B CLI command surface with clap routing, IPC-first daemon access, offline fallback when no daemon is running, update/delete support, and unit/integration tests
+- `src/cli.rs`: Phase 1B CLI command surface with clap routing, IPC-first daemon access, offline fallback when no daemon is running, update/delete support, AI-safe workflows, repo protection commands (`scan-diff`, `protect-repo`), and unit/integration tests
 - `src/ipc_client.rs`: per-user Unix socket IPC helpers for daemon discovery and request/response transport
 - `src/audit_log.rs`: access-event audit logging with newline-delimited JSON storage, filters, clear support, and daemon access logging
 - `src/settings.rs`: settings persistence and nested CLI config surface with safe defaults; runtime Argon2 and timeout wiring are part of pre-Phase-1C technical debt closure

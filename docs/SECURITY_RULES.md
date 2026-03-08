@@ -157,6 +157,23 @@ If you see a secret value being passed to any logging function: stop.
 
 ---
 
+## RULE 11A — Repo protection must never print or persist secret values
+
+`scan-diff` and related repo-protection flows may compare staged diff text
+against stored secret values, but they must never echo, log, or persist the
+matched values themselves.
+
+Allowed output:
+- matching key names
+- blocked/clean status
+
+Forbidden output:
+- the secret value
+- any substring of the secret value
+- the full diff payload in debug/error output
+
+---
+
 ## RULE 12 — PIN dialog sends only a boolean to Rust
 
 The frontend generates a 2-digit code, shows it to the user,

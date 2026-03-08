@@ -170,6 +170,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Linux POC now requires a `pid` field on `get_secret` requests, but currently only accepts the placeholder value `0`; nonzero PID validation remains a later daemon step
 - Daemon request handling now uses an explicit internal error model before converting failures into structured JSON error responses
 - Real daemon groundwork now includes in-memory vault state, pending/active token records, phase1/phase2 token registration, token validation, invalidation, best-effort hardening helpers, and monitoring scaffolding
+- Group 4 repo protection support now includes daemon-owned staged-diff scanning against project secret values, returning matching key names only
 
 ---
 
@@ -231,6 +232,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 - Includes tests for config resolution, POC compatibility, IPC lifecycle behavior, and command parsing/output contracts
 - Group 2 pre-Phase-1C additions live here too: `cmd_doctor`, `cmd_dev`, dotenv warnings, and audit stale-report helpers
 - Group 3 pre-Phase-1C additions live here too: `cmd_ai_safe`, `cmd_share`, and `cmd_claim`
+- Group 4 pre-Phase-1C additions live here too: `cmd_scan_diff` and `cmd_protect_repo`
 
 `.lokalvault` is now TOML-backed and may include `[project]` and `[keys]`
 sections. Required keys enforcement for `run` depends on that manifest.

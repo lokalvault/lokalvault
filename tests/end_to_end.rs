@@ -8,6 +8,8 @@ use lokalvault::vault_file::{Project, Secret, VaultData};
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
@@ -285,4 +287,169 @@ fn test_ai_safe_generates_env_example() {
         .unwrap();
     assert!(output.status.success());
     assert!(tmp.join(".env.example").exists());
+}
+
+#[test]
+fn test_scan_diff_detects_secret_value_in_diff() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let state = start_daemon(VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: "my-app".to_string(),
+            secrets: vec![Secret {
+                key: "OPENAI_KEY".to_string(),
+                value: "test-value-123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        }],
+    });
+
+    let matches = lokalvault::daemon::scan_diff_for_project(
+        &state,
+        "my-app",
+        "+ OPENAI_KEY=test-value-123\n",
+    )
+    .unwrap();
+
+    assert_eq!(matches, vec!["OPENAI_KEY".to_string()]);
+}
+
+#[test]
+fn test_scan_diff_ignores_key_names() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let matches = lokalvault::daemon::find_matching_secret_keys(
+        "+ OPENAI_KEY=REDACTED\n",
+        &std::collections::HashMap::from([(
+            "OPENAI_KEY".to_string(),
+            "test-value-123".to_string(),
+        )]),
+    );
+
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn test_scan_diff_ignores_short_values() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let state = start_daemon(VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: "my-app".to_string(),
+            secrets: vec![Secret {
+                key: "PIN".to_string(),
+                value: "1234567".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        }],
+    });
+    let matches =
+        lokalvault::daemon::scan_diff_for_project(&state, "my-app", "+ PIN=1234567").unwrap();
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn test_scan_diff_clean_diff_exits_0() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let state = start_daemon(VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: "my-app".to_string(),
+            secrets: vec![Secret {
+                key: "OPENAI_KEY".to_string(),
+                value: "test-value-123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        }],
+    });
+    let matches =
+        lokalvault::daemon::scan_diff_for_project(&state, "my-app", "+ NOTHING=here").unwrap();
+    assert!(matches.is_empty());
+}
+
+#[test]
+fn test_scan_diff_uses_project_from_lokalvault_config() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-scan-diff-config");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(tmp.join(".lokalvault"), "[project]\nname = \"my-app\"\n").unwrap();
+
+    let project = std::env::current_dir()
+        .and_then(|original| {
+            std::env::set_current_dir(&tmp)?;
+            let result = get_project_from_config();
+            std::env::set_current_dir(original)?;
+            result.map_err(std::io::Error::other)
+        })
+        .unwrap();
+
+    assert_eq!(project, Some("my-app".to_string()));
+}
+
+#[test]
+fn test_protect_repo_creates_executable_hook() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-protect-repo");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(tmp.join(".git/hooks")).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["protect-repo", "--project", "my-app"])
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let hook_path = tmp.join(".git/hooks/pre-commit");
+    assert!(hook_path.exists());
+    let hook = fs::read_to_string(&hook_path).unwrap();
+    assert!(hook.contains("# lokalvault-managed"));
+    assert!(hook.contains("lokalvault scan-diff --project 'my-app'"));
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&hook_path).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
+#[test]
+fn test_protect_repo_refuses_to_overwrite_foreign_hook() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-protect-repo-foreign");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(tmp.join(".git/hooks")).unwrap();
+    fs::write(
+        tmp.join(".git/hooks/pre-commit"),
+        "#!/bin/sh\necho custom\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("protect-repo")
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite"));
+}
+
+#[test]
+fn test_protect_repo_errors_outside_git_repo() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-no-git-repo");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("protect-repo")
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a git repository"));
 }
