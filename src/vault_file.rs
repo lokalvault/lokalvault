@@ -52,10 +52,16 @@ impl Default for VaultData {
 
 // ── Vault path ──────────────────────────────────────────────────
 
+pub fn get_app_data_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("lokalvault")
+}
+
 pub fn get_vault_path() -> PathBuf {
-    // POC: just use current directory
-    // Production: use dirs crate for OS app data dir
-    PathBuf::from("test_vault.lv")
+    get_app_data_dir().join("vault.lv")
 }
 
 fn get_temp_vault_path(path: &Path) -> PathBuf {

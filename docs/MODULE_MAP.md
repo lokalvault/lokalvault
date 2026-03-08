@@ -241,6 +241,9 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `read_audit_log` | Read with optional filter |
 | `clear_audit_log` | User-initiated only |
 
+`process_name` and `exe_path` are informational only in the current phase.
+They are client-supplied metadata and are not kernel-verified identity.
+
 ---
 
 ## src/settings.rs — Module 8
@@ -251,6 +254,12 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `get_settings_path` | Returns settings file path |
 | `read_settings` | Returns defaults if file missing. Never fails. |
 | `write_settings` | Serialize and write. |
+
+**Current implementation status:**
+- Settings persistence implemented with defaults and nested `config get/set/list` CLI access
+- `session_timeout_minutes` is used by runtime token expiry logic
+- `default_project` is used as a final fallback after `--project` and `.lokalvault`
+- Argon2 tuning values are stored but not yet applied at runtime; full wiring is deferred to Phase 1C through `src/crypto.rs`
 
 ---
 

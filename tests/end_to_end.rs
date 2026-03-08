@@ -224,13 +224,13 @@ fn test_config_set_and_get() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let set_output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .args(["config-set", "session-timeout-minutes", "120"])
+        .args(["config", "set", "session-timeout-minutes", "120"])
         .output()
         .unwrap();
     assert!(set_output.status.success());
 
     let get_output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .args(["config-get", "session-timeout-minutes"])
+        .args(["config", "get", "session-timeout-minutes"])
         .output()
         .unwrap();
     assert!(get_output.status.success());

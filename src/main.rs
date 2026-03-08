@@ -81,14 +81,10 @@ enum Commands {
         process_name: Option<String>,
     },
     AuditClear,
-    ConfigGet {
-        key: String,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
     },
-    ConfigSet {
-        key: String,
-        value: String,
-    },
-    ConfigList,
     Push {
         project: String,
         #[arg(long)]
@@ -102,6 +98,13 @@ enum Commands {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    Get { key: String },
+    Set { key: String, value: String },
+    List,
 }
 
 #[tokio::main]
@@ -210,17 +213,21 @@ async fn main() {
         Commands::AuditClear => cli::cmd_audit_clear().map(|message| {
             eprintln!("{message}");
         }),
-        Commands::ConfigGet { key } => cli::cmd_config_get(&key).map(|value| {
-            println!("{value}");
-        }),
-        Commands::ConfigSet { key, value } => cli::cmd_config_set(&key, &value).map(|message| {
-            eprintln!("{message}");
-        }),
-        Commands::ConfigList => cli::cmd_config_list().map(|output| {
-            if !output.is_empty() {
-                println!("{output}");
+        Commands::Config { command } => match command {
+            ConfigCommands::Get { key } => cli::cmd_config_get(&key).map(|value| {
+                println!("{value}");
+            }),
+            ConfigCommands::Set { key, value } => {
+                cli::cmd_config_set(&key, &value).map(|message| {
+                    eprintln!("{message}");
+                })
             }
-        }),
+            ConfigCommands::List => cli::cmd_config_list().map(|output| {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            }),
+        },
         Commands::Push {
             project,
             target,

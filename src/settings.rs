@@ -1,3 +1,4 @@
+use crate::vault_file::get_app_data_dir;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
@@ -30,12 +31,7 @@ impl Default for Settings {
 }
 
 pub fn get_settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("lokalvault")
-        .join("settings.json")
+    get_app_data_dir().join("settings.json")
 }
 
 pub fn read_settings() -> Settings {
@@ -66,6 +62,10 @@ pub fn write_settings(settings: &Settings) -> Result<(), String> {
     fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// Argon2 settings are stored in settings.json for future tuning, but they are
+// not yet applied at runtime. Wiring them safely requires src/crypto.rs
+// ownership and is deferred to Phase 1C.
 
 #[cfg(test)]
 mod tests {

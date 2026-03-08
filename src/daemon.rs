@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::audit_log::{AccessEvent, log_access_event};
 use crate::ipc_client::get_socket_path;
+use crate::settings::read_settings;
 use crate::vault_file::VaultData;
 use crate::vault_ops::{
     ProjectSummary, add_project, add_secret, delete_project, delete_secret, import_dotenv,
@@ -142,6 +143,7 @@ pub async fn run_daemon_poc() -> Result<(), String> {
 }
 
 pub async fn run_daemon_server(vault_data: VaultData) -> Result<(), String> {
+    let _settings = read_settings();
     let (socket_path, listener) = create_user_socket()?;
     run_daemon_server_with_listener(vault_data, socket_path, listener).await
 }
@@ -612,6 +614,22 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
 }
 
 async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Result<bool, String> {
+    let (_, uid) = get_peer_credentials(stream)?;
+    let current_uid = unsafe { libc::geteuid() };
+    if uid != current_uid {
+        eprintln!("Warning: rejected connection from uid {uid}");
+        let mut payload =
+            serde_json::to_string(&json!({ "ok": false, "error": "permission denied" }))
+                .map_err(|e| e.to_string())?;
+        payload.push('\n');
+        stream
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.shutdown().await.map_err(|e| e.to_string())?;
+        return Ok(false);
+    }
+
     let request = read_json_request(stream).await.map_err(|e| e.message())?;
     let response = handle_ipc_request(state, &request)?;
     let mut payload = serde_json::to_string(&response).map_err(|e| e.to_string())?;

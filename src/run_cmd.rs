@@ -3,6 +3,7 @@ use crate::daemon::{
     DaemonState, POC_SOCKET_PATH, fetch_all_secrets as fetch_all_secrets_from_state,
     register_token_phase1, register_token_phase2,
 };
+use crate::settings::read_settings;
 use crate::vault_file::get_vault_path;
 use std::collections::HashMap;
 use std::fs;
@@ -51,7 +52,13 @@ pub async fn cmd_run(
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let child_pid = child.id();
 
-    register_token_phase2(state, &token, child_pid, Duration::from_secs(60))?;
+    let timeout_minutes = read_settings().session_timeout_minutes as u64;
+    register_token_phase2(
+        state,
+        &token,
+        child_pid,
+        Duration::from_secs(timeout_minutes * 60),
+    )?;
     child.wait().map_err(|e| e.to_string())
 }
 
@@ -90,11 +97,20 @@ pub async fn cmd_run_entry(
     project: Option<&str>,
     command: Vec<String>,
 ) -> Result<std::process::ExitStatus, String> {
-    if crate::ipc_client::is_daemon_running() {
-        return Err("vault is locked; run `lokalvault unlock` first".to_string());
+    let resolved_project = match project {
+        Some(project) => Some(project.to_string()),
+        None => get_project_from_config()?,
+    };
+
+    if crate::ipc_client::is_daemon_running() && resolved_project.is_some() {
+        return Err("real daemon-backed run path is not wired yet".to_string());
     }
 
-    if project.is_none() && get_project_from_config()?.is_none() {
+    if crate::ipc_client::is_daemon_running() && resolved_project.is_none() {
+        return Err("run lokalvault init first or pass --project".to_string());
+    }
+
+    if !crate::ipc_client::is_daemon_running() && resolved_project.is_none() {
         return match cmd_run_poc(command).await {
             Ok(status) => Ok(status),
             Err(error) if error.contains("No such file or directory") => {
@@ -104,7 +120,15 @@ pub async fn cmd_run_entry(
         };
     }
 
-    cmd_run_unified(None, project, command).await
+    if !crate::ipc_client::is_daemon_running() && project.is_some() {
+        return Err("vault is locked - run lokalvault unlock first".to_string());
+    }
+
+    if resolved_project.is_some() {
+        return cmd_run_poc(command).await;
+    }
+
+    cmd_run_unified(None, resolved_project.as_deref(), command).await
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
@@ -134,7 +158,7 @@ pub fn get_project_from_config() -> Result<Option<String>, String> {
         }
     }
 
-    Ok(None)
+    Ok(read_settings().default_project)
 }
 
 pub fn inject_secrets_into_env(

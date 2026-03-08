@@ -1,3 +1,4 @@
+use crate::vault_file::get_app_data_dir;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -8,6 +9,8 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccessEvent {
     pub timestamp: String,
+    // Informational only for the current phase: these fields are client-supplied
+    // metadata and are not kernel-verified process identity.
     pub process_name: String,
     pub exe_path: String,
     pub project: String,
@@ -24,12 +27,7 @@ pub struct AuditFilter {
 }
 
 pub fn get_audit_log_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("lokalvault")
-        .join("audit.log")
+    get_app_data_dir().join("audit.log")
 }
 
 pub fn log_access_event(event: AccessEvent) -> Result<(), String> {

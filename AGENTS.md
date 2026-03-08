@@ -70,13 +70,13 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 | 9    | Run Real     | `src/run_cmd.rs`  | ✅ DONE     |
 | 10   | CLI          | `src/cli.rs`      | ✅ DONE |
 | 11   | Audit Log    | `src/audit_log.rs` | ✅ DONE |
-| 12   | Settings     | `src/settings.rs` | 🔄 NEXT  |
+| 12   | Settings     | `src/settings.rs` | ✅ DONE  |
 | 13   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
 | 14   | React UI     | `src/`            | ⬜ PHASE 1C |
 
-Current next module from `docs/MODULE_MAP.md`:
+Current next work:
 
-- `src/settings.rs` - implement settings persistence next
+- Phase 1 closure pass before Phase 1C
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -201,7 +201,7 @@ The live codebase is smaller than the full spec.
 - `src/cli.rs`: Phase 1B CLI command surface with clap routing, IPC-first daemon access, offline fallback when no daemon is running, update/delete support, and unit/integration tests
 - `src/ipc_client.rs`: per-user Unix socket IPC helpers for daemon discovery and request/response transport
 - `src/audit_log.rs`: access-event audit logging with newline-delimited JSON storage, filters, clear support, and daemon access logging
-- `src/settings.rs`: pending settings persistence and CLI config surface work
+- `src/settings.rs`: settings persistence and nested CLI config surface with safe defaults; Argon2 tuning values are stored but not yet applied until Phase 1C crypto wiring
 - Planned modules in docs such as `src/settings.rs` and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
