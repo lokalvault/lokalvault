@@ -16,6 +16,7 @@ pub struct AccessEvent {
     pub project: String,
     pub key: String,
     pub method: String,
+    pub last_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -141,6 +142,7 @@ mod tests {
             project: project.to_string(),
             key: key.to_string(),
             method: "run_env".to_string(),
+            last_updated_at: None,
         }
     }
 

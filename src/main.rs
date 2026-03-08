@@ -1,4 +1,8 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{
+    generate,
+    shells::{Bash, Fish, Zsh},
+};
 use lokalvault::{cli, daemon, run_cmd};
 use std::io::Read;
 
@@ -81,6 +85,11 @@ enum Commands {
         process_name: Option<String>,
     },
     AuditClear,
+    Doctor,
+    Dev,
+    Completion {
+        shell: String,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -213,6 +222,26 @@ async fn main() {
         Commands::AuditClear => cli::cmd_audit_clear().map(|message| {
             eprintln!("{message}");
         }),
+        Commands::Doctor => cli::cmd_doctor().map(|(output, failed)| {
+            println!("{output}");
+            if failed {
+                std::process::exit(1);
+            }
+        }),
+        Commands::Dev => cli::cmd_dev().map(|_| {}),
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            match shell.as_str() {
+                "bash" => generate(Bash, &mut cmd, "lokalvault", &mut std::io::stdout()),
+                "zsh" => generate(Zsh, &mut cmd, "lokalvault", &mut std::io::stdout()),
+                "fish" => generate(Fish, &mut cmd, "lokalvault", &mut std::io::stdout()),
+                _ => {
+                    eprintln!("unsupported shell: {shell}");
+                    std::process::exit(1);
+                }
+            }
+            Ok(())
+        }
         Commands::Config { command } => match command {
             ConfigCommands::Get { key } => cli::cmd_config_get(&key).map(|value| {
                 println!("{value}");

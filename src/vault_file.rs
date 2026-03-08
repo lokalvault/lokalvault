@@ -22,6 +22,8 @@ const VERSION: u8 = 0x01;
 pub struct Secret {
     pub key: String,
     pub value: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -166,10 +168,14 @@ mod tests {
                 Secret {
                     key: "OPENAI_KEY".to_string(),
                     value: "sk-test-1234".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 },
                 Secret {
                     key: "STRIPE_SECRET".to_string(),
                     value: "sk_live_5678".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 },
             ],
         });

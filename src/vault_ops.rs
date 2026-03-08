@@ -2,6 +2,7 @@ use crate::crypto::benchmark_argon2;
 use crate::errors::AppError;
 use crate::settings::{read_settings, write_settings};
 use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, write_vault};
+use chrono::Utc;
 use std::fs;
 use std::path::Path;
 
@@ -101,6 +102,8 @@ pub fn add_secret(
     project.secrets.push(Secret {
         key: key.to_string(),
         value: value.to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
     });
 
     Ok(())
@@ -122,6 +125,7 @@ pub fn update_secret(
         .ok_or_else(|| AppError::SecretNotFound(key.to_string()).to_string())?;
 
     secret.value = value.to_string();
+    secret.updated_at = Utc::now().to_rfc3339();
     Ok(())
 }
 
@@ -274,6 +278,8 @@ mod tests {
                 secrets: vec![Secret {
                     key: "OPENAI_KEY".to_string(),
                     value: "test-value-123".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
             }],
         }

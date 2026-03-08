@@ -229,6 +229,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 - Uses clap-based command routing from `src/main.rs`
 - Uses IPC-first daemon access through `src/ipc_client.rs` when a real daemon is running, with offline vault fallback when it is not
 - Includes tests for config resolution, POC compatibility, IPC lifecycle behavior, and command parsing/output contracts
+- Group 2 pre-Phase-1C additions live here too: `cmd_doctor`, `cmd_dev`, dotenv warnings, and audit stale-report helpers
 
 ---
 

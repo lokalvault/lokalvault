@@ -685,6 +685,7 @@ fn handle_ipc_request(
                 project: project.to_string(),
                 key: key.to_string(),
                 method,
+                last_updated_at: None,
             })?;
             json!({ "ok": true, "value": value })
         }
@@ -952,6 +953,8 @@ mod tests {
                 secrets: vec![Secret {
                     key: "OPENAI_KEY".to_string(),
                     value: "test-value-123".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
             }],
         })

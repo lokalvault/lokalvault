@@ -77,7 +77,7 @@ Do not declare Phase 1A complete while placeholder security logic still defines 
 
 Current next work:
 
-- Pre-Phase-1C completion groups before any Tauri/React work
+- Group 2 developer-experience features before any Tauri/React work
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.

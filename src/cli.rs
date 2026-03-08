@@ -88,6 +88,7 @@ pub fn cmd_create() -> Result<String, String> {
 }
 
 pub fn cmd_unlock() -> Result<String, String> {
+    let _ = check_for_dotenv_in_cwd("lokalvault-project");
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password)?;
     spawn_detached_daemon(&vault, &password)?;
@@ -444,6 +445,7 @@ pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String,
 }
 
 pub fn cmd_status() -> Result<String, String> {
+    let _ = check_for_dotenv_in_cwd("lokalvault-project");
     if is_daemon_running() {
         let response = send_ipc_request(json!({ "type": "project_count" }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -618,6 +620,142 @@ pub fn cmd_push(
         secrets.len(),
         push_target_name(target)
     ))
+}
+
+fn check_for_dotenv_in_cwd(project_name: &str) -> Result<(), String> {
+    let dotenv_path = Path::new(".env");
+    if !dotenv_path.exists() {
+        return Ok(());
+    }
+
+    let gitignore = Path::new(".gitignore");
+    if gitignore.exists() {
+        let contents = fs::read_to_string(gitignore).map_err(|e| e.to_string())?;
+        if contents.lines().any(|line| line.trim() == ".env") {
+            return Ok(());
+        }
+    }
+
+    eprintln!("⚠ .env file detected in current directory");
+    eprintln!("  Your secrets may be exposed. Run:");
+    eprintln!("  lokalvault import .env --project {project_name}");
+    Ok(())
+}
+
+pub fn cmd_doctor() -> Result<(String, bool), String> {
+    let mut lines = Vec::new();
+    let mut failed = false;
+
+    if get_vault_path().exists() {
+        lines.push(format!(
+            "✓ Vault file exists at {}",
+            get_vault_path().display()
+        ));
+    } else {
+        lines.push(format!(
+            "✗ Vault file missing at {}",
+            get_vault_path().display()
+        ));
+        failed = true;
+    }
+
+    if is_daemon_running() {
+        lines.push("✓ Daemon running".to_string());
+    } else {
+        lines.push("✗ Daemon not running".to_string());
+        failed = true;
+    }
+
+    if Path::new(".env").exists() {
+        lines.push("⚠ .env file detected in current directory".to_string());
+        eprintln!("Hint: Run lokalvault import .env --project <cwd-name>");
+    }
+
+    let gitignore = Path::new(".gitignore");
+    if gitignore.exists()
+        && fs::read_to_string(gitignore)
+            .map_err(|e| e.to_string())?
+            .contains(".env")
+    {
+        lines.push("✓ .gitignore present and contains .env".to_string());
+    } else {
+        lines.push("✗ .gitignore missing .env entry".to_string());
+        failed = true;
+    }
+
+    if Path::new(".lokalvault").exists() {
+        lines.push("✓ .lokalvault config present in current directory".to_string());
+    } else {
+        lines.push("✗ .lokalvault config missing in current directory".to_string());
+        failed = true;
+    }
+
+    Ok((lines.join("\n"), failed))
+}
+
+pub fn cmd_dev() -> Result<String, String> {
+    let detected = if Path::new(".lokalvault").exists() {
+        vec![
+            "lokalvault".to_string(),
+            "run".to_string(),
+            "--".to_string(),
+            "true".to_string(),
+        ]
+    } else if Path::new("package.json").exists() {
+        let package = fs::read_to_string("package.json").map_err(|e| e.to_string())?;
+        if package.contains("\"dev\"") {
+            vec!["npm".to_string(), "run".to_string(), "dev".to_string()]
+        } else if package.contains("\"start\"") {
+            vec!["npm".to_string(), "start".to_string()]
+        } else {
+            Vec::new()
+        }
+    } else if Path::new("Makefile").exists()
+        && fs::read_to_string("Makefile")
+            .map_err(|e| e.to_string())?
+            .contains("run:")
+    {
+        vec!["make".to_string(), "run".to_string()]
+    } else if Path::new("manage.py").exists() {
+        vec![
+            "python".to_string(),
+            "manage.py".to_string(),
+            "runserver".to_string(),
+        ]
+    } else if Path::new("Cargo.toml").exists() {
+        vec!["cargo".to_string(), "run".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    if detected.is_empty() {
+        return Err(
+            "Could not detect run command. Use: lokalvault run -- <your command>".to_string(),
+        );
+    }
+
+    eprintln!("Running: lokalvault run -- {}", detected.join(" "));
+    Ok(detected.join(" "))
+}
+
+pub fn cmd_audit_stale(days: u64, never_accessed: bool) -> Result<String, String> {
+    let events = read_audit_log(None)?;
+    let since = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    let mut lines = Vec::new();
+
+    for event in events {
+        let accessed = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        if never_accessed || accessed < since {
+            lines.push(format!(
+                "{}   last rotated: unknown   last accessed: {}",
+                event.key, event.timestamp
+            ));
+        }
+    }
+
+    Ok(lines.join("\n"))
 }
 
 fn resolve_project(project: Option<&str>) -> Result<String, String> {

@@ -25,6 +25,8 @@ fn test_real_token_flow_across_run_and_daemon_modules() {
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
                 value: "test-value-123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
         }],
     });
@@ -177,6 +179,8 @@ fn test_audit_log_records_daemon_access() {
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
                 value: "test-value-123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
         }],
     };
@@ -235,4 +239,29 @@ fn test_config_set_and_get() {
         .unwrap();
     assert!(get_output.status.success());
     assert_eq!(String::from_utf8_lossy(&get_output.stdout), "120\n");
+}
+
+#[test]
+fn test_doctor_detects_missing_vault() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fs::remove_file(lokalvault::vault_file::get_vault_path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("doctor")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Vault file missing"));
+}
+
+#[test]
+fn test_dev_fallback_error_no_detection() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("dev")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Could not detect run command"));
 }
