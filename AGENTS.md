@@ -140,6 +140,8 @@ Prefer fixing Clippy warnings in touched code, but do not do broad unrelated cle
 - Show test output: `cargo test -- --nocapture`
 - List tests: `cargo test -- --list`
 - Run tests matching a substring: `cargo test vault_file`
+- Run integration tests: `cargo test --test vault_roundtrip -- --nocapture`
+- Run the official POC demo regression test: `cargo test --test poc_demo -- --nocapture`
 
 Run a single exact test with:
 
@@ -226,7 +228,8 @@ Infer style from the codebase, then let `rustfmt` finalize it.
 
 ### Testing
 
-- Keep unit tests near the implementation in `#[cfg(test)]` modules unless integration coverage is clearly needed.
+- Keep unit tests near the implementation in `#[cfg(test)]` modules.
+- Put cross-module and end-to-end tests in the repo-root `tests/` directory.
 - Test both happy paths and failure paths.
 - For persistence logic, clean up temporary files.
 - For crypto-sensitive code, include tampering and wrong-credential cases.
