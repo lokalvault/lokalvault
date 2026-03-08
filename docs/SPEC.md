@@ -1148,7 +1148,7 @@ The Tauri + React UI is a later thin layer over the same Rust modules, not the s
 - `src/vault_ops.rs` ✅ complete
 - integration test scaffolding in `src/lib.rs` and `tests/` ✅ complete
 - `src/errors.rs` ✅ complete
-- real `src/daemon.rs`
+- real `src/daemon.rs` ✅ groundwork complete
 - real `src/run_cmd.rs`
 
 ### Phase 1B — Full CLI
