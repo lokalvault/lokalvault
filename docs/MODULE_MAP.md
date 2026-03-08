@@ -4,6 +4,17 @@
 If a function isn't listed under a file, it doesn't belong there.
 If you're unsure where something goes: check this file first.
 
+## Phase 1 Implementation Order
+
+1. `src/vault_ops.rs`
+2. `src/errors.rs`
+3. `src/daemon.rs` (real, vault-backed)
+4. `src/run_cmd.rs` (real flow)
+5. `src/cli.rs`
+6. `src/audit_log.rs`
+7. `src/settings.rs`
+8. `src-tauri/` and React UI
+
 ---
 
 ## src/crypto.rs — Module 1
@@ -53,23 +64,23 @@ Offset  Size  Field
 ---
 
 ## src/vault_ops.rs — Module 3
-### All CRUD operations on VaultData. Not started yet.
+### All CRUD operations on VaultData. Phase 1A starts here.
 ### Works in memory. Persists by calling vault_file functions.
 
 | Function | Signature | Status |
 |---|---|---|
-| `create_vault` | `(password: &str) → Result<()>` | ⬜ Phase 1 |
-| `unlock_vault` | `(password: &str) → Result<VaultData>` | ⬜ Phase 1 |
-| `lock_vault` | `(vault: &mut VaultData)` | ⬜ Phase 1 |
-| `add_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | ⬜ Phase 1 |
-| `delete_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | ⬜ Phase 1 |
-| `add_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | ⬜ Phase 1 |
-| `update_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | ⬜ Phase 1 |
-| `delete_secret` | `(vault: &mut VaultData, project: &str, key: &str) → Result<()>` | ⬜ Phase 1 |
-| `list_projects` | `(vault: &VaultData) → Vec<ProjectSummary>` | ⬜ Phase 1 |
-| `list_secret_keys` | `(vault: &VaultData, project: &str) → Result<Vec<String>>` | ⬜ Phase 1 |
-| `import_dotenv` | `(vault: &mut VaultData, project: &str, path: &Path) → Result<ImportResult>` | ⬜ Phase 1 |
-| `change_master_password` | `(vault: &mut VaultData, current: &str, new: &str) → Result<()>` | ⬜ Phase 1 |
+| `create_vault` | `(password: &str) → Result<()>` | 🔄 NEXT |
+| `unlock_vault` | `(password: &str) → Result<VaultData>` | 🔄 NEXT |
+| `lock_vault` | `(vault: &mut VaultData)` | 🔄 NEXT |
+| `add_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | 🔄 NEXT |
+| `delete_project` | `(vault: &mut VaultData, name: &str) → Result<()>` | 🔄 NEXT |
+| `add_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | 🔄 NEXT |
+| `update_secret` | `(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>` | 🔄 NEXT |
+| `delete_secret` | `(vault: &mut VaultData, project: &str, key: &str) → Result<()>` | 🔄 NEXT |
+| `list_projects` | `(vault: &VaultData) → Vec<ProjectSummary>` | 🔄 NEXT |
+| `list_secret_keys` | `(vault: &VaultData, project: &str) → Result<Vec<String>>` | 🔄 NEXT |
+| `import_dotenv` | `(vault: &mut VaultData, project: &str, path: &Path) → Result<ImportResult>` | 🔄 NEXT |
+| `change_master_password` | `(vault: &mut VaultData, current: &str, new: &str) → Result<()>` | 🔄 NEXT |
 
 **Validation rules (enforced here):**
 - Project names: alphanumeric + hyphens only, max 64 chars, unique
@@ -103,18 +114,18 @@ Offset  Size  Field
 ### Phase 1 scope (build later):
 | Function | Description | Status |
 |---|---|---|
-| `start_daemon` | Detached process, receives vault via startup pipe | ⬜ Phase 1 |
-| `stop_daemon` | Zeroize secrets → close socket → exit | ⬜ Phase 1 |
-| `handle_connection` | Route requests, verify credentials | ⬜ Phase 1 |
+| `start_daemon` | Detached process, receives vault via startup pipe | ⬜ Phase 1A |
+| `stop_daemon` | Zeroize secrets → close socket → exit | ⬜ Phase 1A |
+| `handle_connection` | Route requests, verify credentials | ⬜ Phase 1A |
 | `get_peer_credentials` | SO_PEERCRED (Linux) / LOCAL_PEERCRED (macOS) | 🔄 POC advanced |
-| `validate_token` | Constant-time compare + PID + UID check | ⬜ Phase 1 |
-| `register_token_phase1` | Store pending token with 1000ms window | ⬜ Phase 1 |
-| `register_token_phase2` | Bind token to PID after spawn | ⬜ Phase 1 |
-| `monitor_child_pid` | Poll sysinfo, invalidate token on exit | ⬜ Phase 1 |
-| `invalidate_token` | Remove from token_store | ⬜ Phase 1 |
-| `check_rate_limit` | Max 30 req/s per PID | ⬜ Phase 1 |
-| `disable_core_dumps` | Best-effort, never crash on failure | ⬜ Phase 1 |
-| `lock_memory_pages` | Best-effort mlock, never crash on failure | ⬜ Phase 1 |
+| `validate_token` | Constant-time compare + PID + UID check | ⬜ Phase 1A |
+| `register_token_phase1` | Store pending token with 1000ms window | ⬜ Phase 1A |
+| `register_token_phase2` | Bind token to PID after spawn | ⬜ Phase 1A |
+| `monitor_child_pid` | Poll sysinfo, invalidate token on exit | ⬜ Phase 1A |
+| `invalidate_token` | Remove from token_store | ⬜ Phase 1A |
+| `check_rate_limit` | Max 30 req/s per PID | ⬜ Phase 1A |
+| `disable_core_dumps` | Best-effort, never crash on failure | ⬜ Phase 1A |
+| `lock_memory_pages` | Best-effort mlock, never crash on failure | ⬜ Phase 1A |
 
 **Socket paths:**
 - POC:     `/tmp/lokalvault-test.sock`
@@ -146,11 +157,11 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 | Function | Description | Status |
 |---|---|---|
 | `cmd_run_poc` | Connect to socket → get secrets → spawn child with env injected | ✅ Done |
-| `cmd_run` | Full version with PIN, two-phase tokens, project config | ⬜ Phase 1 |
-| `show_pin_dialog` | Terminal: print code, read stdin. UI: emit event. | ⬜ Phase 1 |
-| `get_project_from_config` | Read .lokalvault in cwd | ⬜ Phase 1 |
-| `inject_secrets_into_env` | cmd.env(key, value) for each secret | ⬜ Phase 1 |
-| `fetch_all_secrets` | Request all secrets for project from daemon | ⬜ Phase 1 |
+| `cmd_run` | Full version with PIN, two-phase tokens, project config | ⬜ Phase 1A |
+| `show_pin_dialog` | Terminal: print code, read stdin. UI: emit event. | ⬜ Phase 1A |
+| `get_project_from_config` | Read .lokalvault in cwd | ⬜ Phase 1A |
+| `inject_secrets_into_env` | cmd.env(key, value) for each secret | ⬜ Phase 1A |
+| `fetch_all_secrets` | Request all secrets for project from daemon | ⬜ Phase 1A |
 
 **Current POC behavior implemented:**
 - Connects to the daemon POC socket
@@ -171,10 +182,14 @@ Phase 2: spawn child (env injected AT spawn time)
 You cannot inject env vars after spawn. You don't have the PID before spawn.
 The 1000ms window between Phase 1 and Phase 2 is the solution.
 
+**State sync invariant for Phase 1:**
+- If the daemon is running, CLI mutations must go through daemon IPC so RAM and disk stay consistent.
+- If the daemon is not running, CLI may mutate the vault file in offline mode.
+
 ---
 
 ## src/cli.rs — Module 6
-### CLI subcommands. Not started. Phase 1.
+### CLI subcommands. Phase 1B.
 
 | Command | Description |
 |---|---|
@@ -188,7 +203,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 ---
 
 ## src/audit_log.rs — Module 7
-### Access logging. NEVER log secret values. Phase 1.
+### Access logging. NEVER log secret values. Phase 1B.
 
 | Function | Description |
 |---|---|
@@ -199,7 +214,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 ---
 
 ## src/settings.rs — Module 8
-### Settings persistence. Phase 1.
+### Settings persistence. Phase 1B.
 
 | Function | Description |
 |---|---|
@@ -209,7 +224,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 ---
 
 ## src/errors.rs — Shared Error Types
-### Define AppError enum here. All modules use this.
+### Define AppError enum here. Phase 1A, after vault_ops.
 
 ```rust
 pub enum AppError {

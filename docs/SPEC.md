@@ -1138,22 +1138,52 @@ Current repository result:
 
 ---
 
+## Current Implementation Plan After POC
+
+Phase 1 is intentionally CLI-first.
+The CLI and Rust core are the product foundation.
+The Tauri + React UI is a later thin layer over the same Rust modules, not the source of truth.
+
+### Phase 1A — Core Rust
+- `src/vault_ops.rs`
+- `src/errors.rs`
+- real `src/daemon.rs`
+- real `src/run_cmd.rs`
+
+### Phase 1B — Full CLI
+- `src/cli.rs`
+- `src/audit_log.rs`
+- `src/settings.rs`
+
+### Phase 1C — Tauri + React UI
+- `src-tauri/`
+- React frontend
+
+### Phase 1 State Sync Invariant
+
+If the daemon is running, CLI CRUD commands must mutate state through daemon IPC so RAM and disk stay in sync.
+If the daemon is not running, CLI may unlock the vault and mutate the vault file in offline mode.
+
+Do not implement file-only CLI writes that bypass a live daemon.
+
+---
+
 ## Phase 1 — Working Core (Week 3–8)
 
 Week 3–4:
-- Complete all Rust modules (ops, daemon, run_cmd)
-- CLI works end-to-end: create vault, add secret, run app
+- Complete core Rust modules: `vault_ops`, `errors`, real `daemon`, real `run_cmd`
+- CLI core works end-to-end: create vault, add secret, unlock, run app
 - No UI yet
 
 Week 5–6:
-- Basic Tauri app: Unlock screen + ProjectDetail screen
-- PIN dialog working end-to-end
-- Two-phase token registration complete
+- Complete CLI commands: init, get, export, import, push, status
+- Add audit log and settings modules
+- Use the CLI daily before UI work begins
 
 Week 7–8:
-- Python SDK (200 lines)
-- Node SDK (250 lines)
-- Import .env with gitignore update
+- Begin Tauri init and basic desktop wrapper
+- Unlock screen + project detail screen
+- PIN dialog working end-to-end through the same Rust core
 
 **Phase 1 success = developer can manage secrets and run their app securely.**
 

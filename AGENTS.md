@@ -25,7 +25,8 @@ If Cursor or Copilot instruction files are added later, treat them as additional
 
 ## Current Phase
 
-The docs describe a larger Tauri + React + CLI product, but this repository is still in the early Rust POC stage.
+The POC is complete and tagged `v0.0.1-poc`.
+Current work is Phase 1, and Phase 1 is intentionally CLI-first.
 
 POC completion is defined explicitly by one end-to-end demo only:
 
@@ -33,25 +34,52 @@ POC completion is defined explicitly by one end-to-end demo only:
 - Expected output: `test-value-123`
 
 If that exact demo does not work reliably, the POC is not complete, even if tests are green.
-The current repository has achieved that POC bar and should now be treated as post-POC work moving toward Phase 1.
+The UI is a later thin layer over the Rust core and CLI, not the source of truth.
 
-Current completed modules in code:
+### Phase 1 Order
 
-- `src/crypto.rs` - done
-- `src/vault_file.rs` - done
-- `src/daemon.rs` - POC done
-- `src/run_cmd.rs` - POC done
-- `src/main.rs` - POC CLI dispatch done
+- `Phase 1A` - `src/vault_ops.rs` -> `src/errors.rs` -> real `src/daemon.rs` -> real `src/run_cmd.rs`
+- `Phase 1B` - `src/cli.rs` -> `src/audit_log.rs` -> `src/settings.rs`
+- `Phase 1C` - Tauri + React UI
+
+### Status Table
+
+| Step | Module       | File              | Status      |
+|------|--------------|-------------------|-------------|
+| 1    | Crypto       | `src/crypto.rs`   | ✅ DONE     |
+| 2    | Vault File   | `src/vault_file.rs` | ✅ DONE   |
+| 3    | Daemon POC   | `src/daemon.rs`   | ✅ DONE     |
+| 4    | Run POC      | `src/run_cmd.rs`  | ✅ DONE     |
+| 5    | Vault Ops    | `src/vault_ops.rs` | 🔄 NEXT    |
+| 6    | Errors       | `src/errors.rs`   | ⬜ PENDING  |
+| 7    | Daemon Real  | `src/daemon.rs`   | ⬜ PENDING  |
+| 8    | Run Real     | `src/run_cmd.rs`  | ⬜ PENDING  |
+| 9    | CLI          | `src/cli.rs`      | ⬜ PENDING  |
+| 10   | Audit Log    | `src/audit_log.rs` | ⬜ PENDING |
+| 11   | Settings     | `src/settings.rs` | ⬜ PENDING  |
+| 12   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
+| 13   | React UI     | `src/`            | ⬜ PHASE 1C |
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/daemon.rs` - next active target for expanding request-level credential enforcement beyond the current UID mismatch rejection
+- `src/vault_ops.rs` - implement the full CRUD and validation layer first
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
 
 After completing each module, update both `AGENTS.md` and the relevant files under `docs/` to reflect the new status, behavior, commands, or ownership changes introduced by that module.
 After those documentation updates, create proper git commits for the completed work and then respond to the user with what changed and the logical next instruction point.
+Create clean commits for module milestones and other meaningful checkpoints; do not leave large security-sensitive work uncommitted.
+Write tests for every feature and validate thoroughly before declaring a module complete.
+
+### Daemon/CLI Sync Rule
+
+Keep this invariant throughout Phase 1:
+
+- If the daemon is running, CLI CRUD commands must mutate state through daemon IPC so RAM and disk stay in sync.
+- If the daemon is not running, CLI may unlock the vault and mutate the vault file in offline mode.
+
+Do not implement file-only CLI writes that bypass a live daemon.
 
 ## Source Of Truth For Ownership
 
@@ -61,7 +89,7 @@ Important boundaries from the current docs:
 
 - `src/crypto.rs` is the only file where crypto primitives may be used.
 - `src/vault_file.rs` owns vault structs and file persistence.
-- `src/vault_ops.rs` will own CRUD and validation logic later.
+- `src/vault_ops.rs` owns CRUD and validation logic.
 - `src/daemon.rs` owns socket serving and credential checks.
 - `src/run_cmd.rs` owns process spawning and env injection.
 - `src/main.rs` should remain an entrypoint, not a business-logic dump.
@@ -146,13 +174,13 @@ If you touch crypto, vault format, daemon IPC, or token flow, prefer full-suite 
 
 The live codebase is smaller than the full spec.
 
-- `src/main.rs`: minimal binary entrypoint
+- `src/main.rs`: clap CLI entrypoint for `daemon-poc` and `run`
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
 - `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, placeholder PID enforcement for Linux requests, explicit internal daemon error variants, structured JSON error responses, and permission tests
 - `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, and env injection test
 
-Planned modules in docs such as `src/vault_ops.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
+Planned modules in docs such as `src/vault_ops.rs`, `src/errors.rs`, `src/cli.rs`, `src/settings.rs`, and `src/audit_log.rs` are not yet implemented in this repository snapshot.
 Do not pretend they exist.
 
 ## Rust Style Guidelines

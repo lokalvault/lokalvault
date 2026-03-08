@@ -18,7 +18,7 @@ Your code gets its secrets. Your AI agent never does.
 🚧 **This repository is under active development.**
 The POC is complete. Do not use this to store real secrets yet.
 
-Current phase: **POC complete, moving toward Phase 1**
+Current phase: **Phase 1 (CLI-first)**
 - [x] Core crypto (AES-256-GCM + Argon2id)
 - [x] Vault file read/write
 - [x] Daemon + Unix socket
@@ -160,6 +160,9 @@ with elevated privileges or root-level attackers (same limitation as
 ## Roadmap
 
 - **POC** (complete) — core crypto + daemon + process injection proven end-to-end
+- **Phase 1A** (current) — vault ops, shared errors, real daemon, real run flow
+- **Phase 1B** — full CLI, audit log, settings
+- **Phase 1C** — Tauri + React UI on top of the CLI/core
 - **v0.1** — working CLI, vault CRUD, Python + Node SDKs
 - **v0.2** — Tauri desktop app, PIN approval dialog, audit log
 - **v1.0** — macOS + Windows + Linux builds, .env import, push to Vercel/Render
