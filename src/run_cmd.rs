@@ -86,6 +86,27 @@ pub async fn cmd_run_unified(
     }
 }
 
+pub async fn cmd_run_entry(
+    project: Option<&str>,
+    command: Vec<String>,
+) -> Result<std::process::ExitStatus, String> {
+    if crate::ipc_client::is_daemon_running() {
+        return Err("vault is locked; run `lokalvault unlock` first".to_string());
+    }
+
+    if project.is_none() && get_project_from_config()?.is_none() {
+        return match cmd_run_poc(command).await {
+            Ok(status) => Ok(status),
+            Err(error) if error.contains("No such file or directory") => {
+                Err("run lokalvault init first or pass --project".to_string())
+            }
+            Err(error) => Err(error),
+        };
+    }
+
+    cmd_run_unified(None, project, command).await
+}
+
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
     let random = generate_token();
     let code = &random[0..2];

@@ -155,10 +155,15 @@ async fn run_daemon_server_with_listener(
     let result: Result<(), String> = async {
         loop {
             let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-            handle_connection(&state, &mut stream).await?;
+            if handle_connection(&state, &mut stream).await? {
+                break;
+            }
         }
+        Ok(())
     }
     .await;
+
+    let _ = stop_daemon(&state);
 
     let cleanup_result = cleanup_socket_file(&socket_path);
     result.and(cleanup_result)
@@ -605,7 +610,7 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
     stream.shutdown().await.map_err(|e| e.to_string())
 }
 
-async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Result<(), String> {
+async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Result<bool, String> {
     let request = read_json_request(stream).await.map_err(|e| e.message())?;
     let response = handle_ipc_request(state, &request)?;
     let mut payload = serde_json::to_string(&response).map_err(|e| e.to_string())?;
@@ -614,7 +619,9 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
         .write_all(payload.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
-    stream.shutdown().await.map_err(|e| e.to_string())
+    stream.shutdown().await.map_err(|e| e.to_string())?;
+
+    Ok(request.get("type").and_then(serde_json::Value::as_str) == Some("shutdown"))
 }
 
 fn handle_ipc_request(
@@ -722,6 +729,7 @@ fn handle_ipc_request(
             json!({ "ok": true })
         }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
+        "shutdown" => json!({ "ok": true }),
         _ => json!({ "ok": false, "error": "unsupported request type" }),
     };
 

@@ -214,10 +214,21 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `cmd_status` | Show vault/daemon/session status |
 
 **Current implementation status:**
-- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_export`, `cmd_status`, and `cmd_push` implemented for the current Phase 1B CLI surface
+- `cmd_create`, `cmd_unlock`, `cmd_lock`, `cmd_init`, `cmd_add`, `cmd_update`, `cmd_delete`, `cmd_delete_project`, `cmd_list`, `cmd_get`, `cmd_import`, `cmd_export`, `cmd_status`, and `cmd_push` implemented for the current Phase 1B CLI surface
 - Uses clap-based command routing from `src/main.rs`
-- Preserves the Phase 1 state-sync invariant by mutating through daemon-backed state when a session is active and using offline vault writes when it is not
-- Includes tests for init/config creation, daemon-backed mutation coverage, get/export output behavior, project/key summary helpers, and push target command wiring
+- Uses IPC-first daemon access through `src/ipc_client.rs` when a real daemon is running, with offline vault fallback when it is not
+- Includes tests for config resolution, POC compatibility, IPC lifecycle behavior, and command parsing/output contracts
+
+---
+
+## src/ipc_client.rs — Module 6A
+### IPC client helpers for CLI-to-daemon transport.
+
+| Function | Description |
+|---|---|
+| `get_socket_path` | Returns per-user Unix socket path |
+| `is_daemon_running` | Detects live daemon by attempting socket connection |
+| `send_ipc_request` | Sends single-line JSON request and parses single-line JSON response |
 
 ---
 

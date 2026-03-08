@@ -1,4 +1,4 @@
-use crate::ipc_client::{is_daemon_running, send_ipc_request};
+use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::get_project_from_config;
 use crate::vault_file::{VaultData, get_vault_path};
 use crate::vault_ops::{
@@ -10,6 +10,8 @@ use serde_json::json;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 #[cfg(test)]
@@ -71,7 +73,7 @@ pub fn cmd_unlock() -> Result<String, String> {
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password)?;
     spawn_detached_daemon(&vault, &password)?;
-    Ok("Vault unlocked. Daemon active.".to_string())
+    Ok("✓ Vault unlocked. Session active.".to_string())
 }
 
 pub fn cmd_lock() -> Result<String, String> {
@@ -81,7 +83,14 @@ pub fn cmd_lock() -> Result<String, String> {
 
     let response = send_ipc_request(json!({ "type": "shutdown" }))?;
     if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok("Vault locked.".to_string());
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if !get_socket_path().exists() {
+                return Ok("✓ Vault locked.".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        return Err("daemon failed to stop within 3s".to_string());
     }
 
     Err(response_error(&response))
@@ -121,7 +130,7 @@ pub fn cmd_add(project: Option<&str>, key: &str, value: Option<&str>) -> Result<
             "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            return Ok(format!("Added {key} to {project}"));
+            return Ok(format!("✓ Added {key} to {project}"));
         }
         return Err(response_error(&response));
     }
@@ -133,7 +142,7 @@ pub fn cmd_add(project: Option<&str>, key: &str, value: Option<&str>) -> Result<
     }
     add_secret(&mut vault, &project, key, &secret_value)?;
     crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("Added {key} to {project}"))
+    Ok(format!("✓ Added {key} to {project}"))
 }
 
 pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
@@ -153,7 +162,7 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
             "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            return Ok(format!("Updated {key} in {project}"));
+            return Ok(format!("✓ Updated {key} in {project}"));
         }
         return Err(response_error(&response));
     }
@@ -162,7 +171,7 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     let mut vault = unlock_vault(&password)?;
     update_secret(&mut vault, &project, key, &secret_value)?;
     crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("Updated {key} in {project}"))
+    Ok(format!("✓ Updated {key} in {project}"))
 }
 
 pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
@@ -177,7 +186,7 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
             "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            return Ok(format!("Deleted {key} from {project}"));
+            return Ok(format!("✓ Deleted {key} from {project}"));
         }
         return Err(response_error(&response));
     }
@@ -186,7 +195,7 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     let mut vault = unlock_vault(&password)?;
     delete_secret(&mut vault, &project, key)?;
     crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("Deleted {key} from {project}"))
+    Ok(format!("✓ Deleted {key} from {project}"))
 }
 
 pub fn cmd_delete_project(project: &str) -> Result<String, String> {
@@ -198,7 +207,7 @@ pub fn cmd_delete_project(project: &str) -> Result<String, String> {
             "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            return Ok(format!("Deleted project {project}"));
+            return Ok(format!("✓ Deleted project {project}"));
         }
         return Err(response_error(&response));
     }
@@ -207,14 +216,13 @@ pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     let mut vault = unlock_vault(&password)?;
     delete_project(&mut vault, project)?;
     crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("Deleted project {project}"))
+    Ok(format!("✓ Deleted project {project}"))
 }
 
 pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
-    let project = match project {
-        Some(project) => Some(resolve_project(Some(project))?),
-        None => None,
-    };
+    let project = project
+        .map(|name| resolve_project(Some(name)))
+        .transpose()?;
 
     if is_daemon_running() {
         let response = match project.as_deref() {
@@ -337,7 +345,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
         let retired_path = retire_import_file(path)?;
         ensure_gitignore_contains(&retired_path)?;
         return Ok(format!(
-            "Imported {} secrets into {} (skipped {}) - retired to {}",
+            "✓ Imported {} secrets into {} (skipped {}) - retired to {}",
             imported,
             project,
             skipped,
@@ -355,7 +363,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     let retired_path = retire_import_file(path)?;
     ensure_gitignore_contains(&retired_path)?;
     Ok(format!(
-        "Imported {} secrets into {} (skipped {}) - retired to {}",
+        "✓ Imported {} secrets into {} (skipped {}) - retired to {}",
         result.imported,
         project,
         result.skipped,
@@ -473,7 +481,10 @@ pub fn cmd_push(
     };
 
     if !matches!(target, PushTarget::Vercel) && environment != "production" {
-        eprintln!("Warning: --env ignored for {}", push_target_name(target));
+        eprintln!(
+            "Warning: --env is not supported for {}, ignoring",
+            push_target_name(target)
+        );
     }
 
     for (key, value) in &secrets {
@@ -498,8 +509,9 @@ pub fn cmd_push(
 fn resolve_project(project: Option<&str>) -> Result<String, String> {
     match project {
         Some(project) => Ok(project.to_string()),
-        None => get_project_from_config()?
-            .ok_or_else(|| "run lokalvault init first or pass --project".to_string()),
+        None => get_project_from_config()?.ok_or_else(|| {
+            "no project specified - run lokalvault init or pass --project".to_string()
+        }),
     }
 }
 
@@ -512,18 +524,24 @@ fn response_error(response: &serde_json::Value) -> String {
 }
 
 fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String> {
-    let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+    let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    command
         .arg("daemon")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::null());
 
     #[cfg(unix)]
     unsafe {
-        libc::setsid();
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
+
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
 
     let payload = serde_json::to_vec(&(vault, password)).map_err(|e| e.to_string())?;
     child
@@ -535,13 +553,13 @@ fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String
 
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
-        if is_daemon_running() {
+        if get_socket_path().exists() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    Err("daemon failed to start".to_string())
+    Err("daemon failed to start within 5s".to_string())
 }
 
 fn retire_import_file(path: &Path) -> Result<std::path::PathBuf, String> {

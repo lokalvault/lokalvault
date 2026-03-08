@@ -180,11 +180,9 @@ async fn main() {
                 eprintln!("{message}");
             })
         }
-        Commands::Run { project, command } => {
-            run_cmd::cmd_run_unified(None, project.as_deref(), command)
-                .await
-                .map(|_| ())
-        }
+        Commands::Run { project, command } => run_cmd::cmd_run_entry(project.as_deref(), command)
+            .await
+            .map(|_| ()),
     };
 
     if let Err(error) = result {

@@ -1,9 +1,12 @@
 use lokalvault::daemon::{
     fetch_all_secrets, register_token_phase1, register_token_phase2, start_daemon,
 };
+use lokalvault::ipc_client::{get_socket_path, send_ipc_request};
 use lokalvault::run_cmd::{fetch_all_secrets as run_fetch_all_secrets, get_project_from_config};
 use lokalvault::vault_file::{Project, Secret, VaultData};
+use serde_json::json;
 use std::fs;
+use std::io::Write;
 use std::process::Command;
 use std::sync::Mutex;
 use std::thread;
@@ -103,4 +106,57 @@ fn test_run_with_project_config_uses_project_automatically() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "test-value-123\n");
+}
+
+#[test]
+fn test_ipc_full_lifecycle() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let socket = get_socket_path();
+    let _ = fs::remove_file(&socket);
+
+    let input = serde_json::to_vec(&(VaultData::new(), "password".to_string())).unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("daemon")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    daemon.stdin.take().unwrap().write_all(&input).unwrap();
+
+    for _ in 0..50 {
+        if socket.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let add = send_ipc_request(json!({
+        "type": "add_secret",
+        "project": "my-app",
+        "key": "OPENAI_KEY",
+        "value": "test-value-123",
+        "password": "password"
+    }))
+    .unwrap();
+    assert_eq!(add["ok"], true);
+
+    let get = send_ipc_request(json!({
+        "type": "get_secret",
+        "project": "my-app",
+        "key": "OPENAI_KEY"
+    }))
+    .unwrap();
+    assert_eq!(get["value"], "test-value-123");
+
+    let delete = send_ipc_request(json!({
+        "type": "delete_secret",
+        "project": "my-app",
+        "key": "OPENAI_KEY",
+        "password": "password"
+    }))
+    .unwrap();
+    assert_eq!(delete["ok"], true);
+
+    let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
+    assert_eq!(shutdown["ok"], true);
+    let _ = daemon.wait();
 }
