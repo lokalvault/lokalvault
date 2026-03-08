@@ -3,6 +3,7 @@ use crate::settings::read_settings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroize;
 
 // ── Binary file layout ──────────────────────────────────────────
 // Offset  Size  Field
@@ -18,7 +19,7 @@ const VERSION: u8 = 0x01;
 
 // ── In-memory data model ────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Zeroize)]
 pub struct Secret {
     pub key: String,
     pub value: String,
@@ -26,13 +27,13 @@ pub struct Secret {
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Zeroize)]
 pub struct Project {
     pub name: String,
     pub secrets: Vec<Secret>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Zeroize)]
 pub struct VaultData {
     pub version: u8,
     pub projects: Vec<Project>,
@@ -56,11 +57,39 @@ impl Default for VaultData {
 // ── Vault path ──────────────────────────────────────────────────
 
 pub fn get_app_data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".local")
-        .join("share")
-        .join("lokalvault")
+    if let Ok(override_dir) = std::env::var("LOKALVAULT_DATA_DIR") {
+        return PathBuf::from(override_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("LokalVault")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("lokalvault")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(appdata).join("LokalVault")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("lokalvault")
+    }
 }
 
 pub fn get_vault_path() -> PathBuf {
@@ -100,10 +129,16 @@ pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
     bytes.extend_from_slice(&nonce);
     bytes.extend_from_slice(&ciphertext);
 
-    // Atomic write: write temp → rename over original
+    // Atomic write: write temp → fsync → rename over original
     let path = get_vault_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let tmp_path = get_temp_vault_path(&path);
-    fs::write(&tmp_path, &bytes).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
     fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -147,19 +182,13 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static VAULT_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn cleanup() {
-        let _ = fs::remove_file(get_vault_path());
-        let _ = fs::remove_file(get_temp_vault_path(&get_vault_path()));
-    }
+    use crate::test_utils::{DATA_DIR_LOCK, cleanup_test_dir, setup_test_dir};
 
     #[test]
     fn test_write_and_read_vault() {
-        let _guard = VAULT_TEST_LOCK.lock().unwrap();
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let mut vault = VaultData::new();
         vault.projects.push(Project {
@@ -190,13 +219,14 @@ mod tests {
         assert_eq!(loaded.projects[0].secrets[0].value, "sk-test-1234");
 
         println!("✓ vault written and read back correctly");
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_wrong_password_on_read() {
-        let _guard = VAULT_TEST_LOCK.lock().unwrap();
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let vault = VaultData::new();
         write_vault(&vault, "correct-password").unwrap();
@@ -204,13 +234,14 @@ mod tests {
 
         assert!(result.is_err());
         println!("✓ wrong password rejected on vault read");
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_magic_bytes_present() {
-        let _guard = VAULT_TEST_LOCK.lock().unwrap();
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         write_vault(&VaultData::new(), "password").unwrap();
         let raw = fs::read(get_vault_path()).unwrap();
@@ -218,6 +249,6 @@ mod tests {
         assert_eq!(&raw[0..4], b"LKVT");
         assert_eq!(raw[4], 0x01);
         println!("✓ magic bytes and version correct");
-        cleanup();
+        cleanup_test_dir("unit");
     }
 }

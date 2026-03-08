@@ -63,3 +63,7 @@ Recommended flow for shared or security-sensitive changes:
 - Do not introduce crypto outside `src/crypto.rs`.
 - Do not log secret values, passwords, tokens, or clipboard contents.
 - Do not simplify two-phase token registration.
+
+## Deferred Work
+
+- **Full error type unification (Phase 1C):** `vault_ops.rs` now returns `AppError` internally, but callers in `cli.rs` and `daemon.rs` convert back to `String` at module boundaries via `.map_err(|e| e.to_string())`. Phase 1C should propagate `AppError` end-to-end and eliminate the `Result<_, String>` return types from CLI and daemon functions.

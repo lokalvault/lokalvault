@@ -1,4 +1,3 @@
-use lokalvault::vault_file::get_vault_path;
 use lokalvault::vault_ops::{
     add_project, add_secret, change_master_password, create_vault, import_dotenv, list_secret_keys,
     unlock_vault,
@@ -16,14 +15,26 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn cleanup() {
-    let _ = fs::remove_file(get_vault_path());
-    let _ = fs::remove_file(Path::new("test.env"));
+    let dir =
+        std::env::temp_dir().join(format!("lokalvault-roundtrip-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    let _ = std::fs::remove_file(std::path::Path::new("test.env"));
+}
+
+fn setup_test_dir() -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("lokalvault-roundtrip-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", &dir) };
+    dir
 }
 
 #[test]
 fn test_full_vault_roundtrip() {
     let _guard = test_lock();
     cleanup();
+    setup_test_dir();
 
     create_vault("password").unwrap();
     let mut vault = unlock_vault("password").unwrap();
@@ -44,6 +55,7 @@ fn test_full_vault_roundtrip() {
 fn test_vault_survives_reopen_after_import_and_password_change() {
     let _guard = test_lock();
     cleanup();
+    setup_test_dir();
 
     create_vault("old-password").unwrap();
     let mut vault = unlock_vault("old-password").unwrap();

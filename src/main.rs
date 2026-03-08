@@ -168,9 +168,9 @@ async fn main() {
         Commands::Daemon => {
             let mut input = Vec::new();
             std::io::stdin().read_to_end(&mut input).unwrap();
-            let (vault, _password): (lokalvault::vault_file::VaultData, String) =
+            let (vault, password): (lokalvault::vault_file::VaultData, String) =
                 serde_json::from_slice(&input).unwrap();
-            daemon::run_daemon_server(vault).await.map(|_| ())
+            daemon::run_daemon_server(vault, password).await.map(|_| ())
         }
         Commands::Create => cli::cmd_create().map(|message| {
             eprintln!("{message}");
@@ -300,7 +300,13 @@ async fn main() {
                 std::process::exit(1);
             }
         }),
-        Commands::Dev => cli::cmd_dev().map(|_| {}),
+        Commands::Dev => match cli::cmd_dev() {
+            Ok(detected) => {
+                let parts: Vec<String> = detected.split_whitespace().map(String::from).collect();
+                run_cmd::cmd_run_entry(None, parts, false).await.map(|_| ())
+            }
+            Err(e) => Err(e),
+        },
         Commands::AiSafe {
             project,
             generate_example,

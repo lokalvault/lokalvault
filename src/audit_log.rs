@@ -124,14 +124,8 @@ fn matches_filter(event: &AccessEvent, filter: Option<&AuditFilter>) -> Result<b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::test_utils::{DATA_DIR_LOCK, cleanup_test_dir, setup_test_dir};
     use std::time::{Duration, UNIX_EPOCH};
-
-    static AUDIT_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn cleanup() {
-        let _ = fs::remove_file(get_audit_log_path());
-    }
 
     fn sample_event(project: &str, key: &str, seconds: u64) -> AccessEvent {
         AccessEvent {
@@ -148,21 +142,23 @@ mod tests {
 
     #[test]
     fn test_log_and_read_event() {
-        let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let event = sample_event("my-app", "OPENAI_KEY", 10);
         log_access_event(event.clone()).unwrap();
         let events = read_audit_log(None).unwrap();
 
         assert_eq!(events, vec![event]);
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_filter_by_project() {
-        let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         log_access_event(sample_event("my-app", "OPENAI_KEY", 10)).unwrap();
         log_access_event(sample_event("other-app", "STRIPE_KEY", 20)).unwrap();
@@ -175,13 +171,14 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].project, "my-app");
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_filter_by_since() {
-        let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         log_access_event(sample_event("my-app", "OLD_KEY", 10)).unwrap();
         log_access_event(sample_event("my-app", "NEW_KEY", 20)).unwrap();
@@ -194,25 +191,26 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key, "NEW_KEY");
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_clear_audit_log() {
-        let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         log_access_event(sample_event("my-app", "OPENAI_KEY", 10)).unwrap();
         clear_audit_log().unwrap();
         let events = read_audit_log(None).unwrap();
 
         assert!(events.is_empty());
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_never_logs_value() {
-        let _guard = AUDIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let event = sample_event("my-app", "OPENAI_KEY", 10);
         let value = serde_json::to_value(&event).unwrap();
         assert!(value.get("value").is_none());

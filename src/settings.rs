@@ -70,15 +70,7 @@ pub fn write_settings(settings: &Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static SETTINGS_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn cleanup() {
-        let path = get_settings_path();
-        let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(path.with_extension("json.tmp"));
-    }
+    use crate::test_utils::{DATA_DIR_LOCK, cleanup_test_dir, setup_test_dir};
 
     #[test]
     fn test_default_settings() {
@@ -95,8 +87,9 @@ mod tests {
 
     #[test]
     fn test_write_and_read_settings() {
-        let _guard = SETTINGS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let settings = Settings {
             session_timeout_minutes: 120,
@@ -112,21 +105,23 @@ mod tests {
         let loaded = read_settings();
 
         assert_eq!(loaded, settings);
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_missing_file_returns_defaults() {
-        let _guard = SETTINGS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         assert_eq!(read_settings(), Settings::default());
     }
 
     #[test]
     fn test_corrupted_file_returns_defaults() {
-        let _guard = SETTINGS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let path = get_settings_path();
         if let Some(parent) = path.parent() {
@@ -135,16 +130,17 @@ mod tests {
         fs::write(&path, "not-json").unwrap();
 
         assert_eq!(read_settings(), Settings::default());
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_atomic_write() {
-        let _guard = SETTINGS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         write_settings(&Settings::default()).unwrap();
         assert!(!get_settings_path().with_extension("json.tmp").exists());
-        cleanup();
+        cleanup_test_dir("unit");
     }
 }

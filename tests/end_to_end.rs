@@ -18,6 +18,19 @@ use std::time::Duration;
 
 static END_TO_END_LOCK: Mutex<()> = Mutex::new(());
 
+fn setup_test_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", &dir) };
+    dir
+}
+
+fn cleanup_test_dir() {
+    let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+}
+
 #[test]
 fn test_real_token_flow_across_run_and_daemon_modules() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -117,6 +130,7 @@ fn test_run_with_project_config_uses_project_automatically() {
 #[test]
 fn test_ipc_full_lifecycle() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let socket = get_socket_path();
     let _ = fs::remove_file(&socket);
 
@@ -165,11 +179,13 @@ fn test_ipc_full_lifecycle() {
     let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
     assert_eq!(shutdown["ok"], true);
     let _ = daemon.wait();
+    cleanup_test_dir();
 }
 
 #[test]
 fn test_audit_log_records_daemon_access() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     clear_audit_log().unwrap();
 
     let socket = get_socket_path();
@@ -224,11 +240,13 @@ fn test_audit_log_records_daemon_access() {
     let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
     assert_eq!(shutdown["ok"], true);
     let _ = daemon.wait();
+    cleanup_test_dir();
 }
 
 #[test]
 fn test_config_set_and_get() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
 
     let set_output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
         .args(["config", "set", "session-timeout-minutes", "120"])
@@ -242,11 +260,13 @@ fn test_config_set_and_get() {
         .unwrap();
     assert!(get_output.status.success());
     assert_eq!(String::from_utf8_lossy(&get_output.stdout), "120\n");
+    cleanup_test_dir();
 }
 
 #[test]
 fn test_doctor_detects_missing_vault() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let _ = fs::remove_file(lokalvault::vault_file::get_vault_path());
 
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
@@ -255,6 +275,7 @@ fn test_doctor_detects_missing_vault() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Vault file missing"));
+    cleanup_test_dir();
 }
 
 #[test]
@@ -477,6 +498,7 @@ fn test_init_with_template_writes_required_keys() {
 #[test]
 fn test_diff_dotenv_redacts_values() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let diff = lokalvault::cli::cmd_diff(
         std::path::Path::new("/tmp/does-not-need-to-exist.env"),
         Some("my-app"),
@@ -485,6 +507,7 @@ fn test_diff_dotenv_redacts_values() {
 
     assert!(!diff.contains("local-secret"));
     assert!(diff.contains("<value present>") || diff.contains("<value differs>"));
+    cleanup_test_dir();
 }
 
 #[test]

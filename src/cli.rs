@@ -90,14 +90,23 @@ pub fn prompt_password(prompt: &str) -> Result<String, String> {
 
 pub fn cmd_create() -> Result<String, String> {
     let password = prompt_password("Master password: ")?;
-    create_vault(&password)?;
+    let (strength, feedback) = crate::crypto::validate_password_strength(&password);
+    if matches!(
+        strength,
+        crate::crypto::PasswordStrength::TooShort
+            | crate::crypto::PasswordStrength::Weak
+            | crate::crypto::PasswordStrength::Fair
+    ) {
+        return Err(format!("password rejected: {feedback}"));
+    }
+    create_vault(&password).map_err(|e| e.to_string())?;
     Ok(format!("Vault created at {}", get_vault_path().display()))
 }
 
 pub fn cmd_unlock() -> Result<String, String> {
     let _ = check_for_dotenv_in_cwd("lokalvault-project");
     let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password)?;
+    let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     spawn_detached_daemon(&vault, &password)?;
     Ok("✓ Vault unlocked. Session active.".to_string())
 }
@@ -211,13 +220,11 @@ pub fn cmd_add(
     };
 
     if is_daemon_running() {
-        let password = prompt_password("Master password: ")?;
         let response = send_ipc_request(json!({
             "type": "add_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-            "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Added {key} to {project}"));
@@ -226,11 +233,11 @@ pub fn cmd_add(
     }
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, &project)?;
+        add_project(&mut vault, &project).map_err(|e| e.to_string())?;
     }
-    add_secret(&mut vault, &project, key, &secret_value)?;
+    add_secret(&mut vault, &project, key, &secret_value).map_err(|e| e.to_string())?;
     crate::vault_file::write_vault(&vault, &password)?;
     Ok(format!("✓ Added {key} to {project}"))
 }
@@ -250,13 +257,11 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     };
 
     if is_daemon_running() {
-        let password = prompt_password("Master password: ")?;
         let response = send_ipc_request(json!({
             "type": "update_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-            "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Updated {key} in {project}"));
@@ -265,8 +270,8 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     }
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
-    update_secret(&mut vault, &project, key, &secret_value)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+    update_secret(&mut vault, &project, key, &secret_value).map_err(|e| e.to_string())?;
     crate::vault_file::write_vault(&vault, &password)?;
     Ok(format!("✓ Updated {key} in {project}"))
 }
@@ -275,12 +280,10 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
-        let password = prompt_password("Master password: ")?;
         let response = send_ipc_request(json!({
             "type": "delete_secret",
             "project": project,
             "key": key,
-            "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted {key} from {project}"));
@@ -289,19 +292,17 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     }
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
-    delete_secret(&mut vault, &project, key)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+    delete_secret(&mut vault, &project, key).map_err(|e| e.to_string())?;
     crate::vault_file::write_vault(&vault, &password)?;
     Ok(format!("✓ Deleted {key} from {project}"))
 }
 
 pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     if is_daemon_running() {
-        let password = prompt_password("Master password: ")?;
         let response = send_ipc_request(json!({
             "type": "delete_project",
             "project": project,
-            "password": password,
         }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted project {project}"));
@@ -310,8 +311,8 @@ pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     }
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
-    delete_project(&mut vault, project)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+    delete_project(&mut vault, project).map_err(|e| e.to_string())?;
     crate::vault_file::write_vault(&vault, &password)?;
     Ok(format!("✓ Deleted project {project}"))
 }
@@ -354,9 +355,11 @@ pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
     }
 
     let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password)?;
+    let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     match project.as_deref() {
-        Some(project) => Ok(list_secret_keys(&vault, project)?.join("\n")),
+        Some(project) => Ok(list_secret_keys(&vault, project)
+            .map_err(|e| e.to_string())?
+            .join("\n")),
         None => Ok(list_projects(&vault)
             .into_iter()
             .map(|entry| format!("{} ({})", entry.name, entry.secret_count))
@@ -384,7 +387,7 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
     }
 
     let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password)?;
+    let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     let project_entry = vault
         .projects
         .iter()
@@ -417,7 +420,6 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     }
 
     if is_daemon_running() {
-        let password = prompt_password("Master password: ")?;
         let mut imported = 0usize;
         let mut skipped = 0usize;
         for raw_line in preview.lines() {
@@ -434,7 +436,6 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
                 "project": project,
                 "key": key.trim(),
                 "value": value.trim(),
-                "password": password,
             }))?;
             if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
                 imported += 1;
@@ -454,11 +455,11 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     }
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, project)?;
+        add_project(&mut vault, project).map_err(|e| e.to_string())?;
     }
-    let result = import_dotenv(&mut vault, project, path)?;
+    let result = import_dotenv(&mut vault, project, path).map_err(|e| e.to_string())?;
     crate::vault_file::write_vault(&vault, &password)?;
     let retired_path = retire_import_file(path)?;
     ensure_gitignore_contains(&retired_path)?;
@@ -475,48 +476,42 @@ pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String,
     let project = resolve_project(project)?;
     eprintln!("Secrets now in shell. Clear with: unset KEY");
 
-    let secrets = if is_daemon_running() {
-        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
-        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(response_error(&response));
-        }
-        response["secrets"].as_object().cloned().unwrap_or_default()
-    } else {
-        let password = prompt_password("Master password: ")?;
-        let vault = unlock_vault(&password)?;
-        let project_entry = vault
-            .projects
-            .iter()
-            .find(|entry| entry.name == project)
-            .ok_or_else(|| format!("project not found: {project}"))?;
-        project_entry
-            .secrets
-            .iter()
-            .map(|secret| {
-                (
-                    secret.key.clone(),
-                    serde_json::Value::String(secret.value.clone()),
-                )
-            })
-            .collect()
-    };
+    let secrets = get_project_secret_map(&project)?;
 
     match format {
         ExportFormat::Dotenv => Ok(secrets
             .iter()
-            .map(|(key, value)| format!("{}={}", key, value.as_str().unwrap_or("")))
+            .map(|(key, value)| {
+                if value.contains('=')
+                    || value.contains(' ')
+                    || value.contains('\n')
+                    || value.contains('"')
+                    || value.contains('\'')
+                {
+                    format!(
+                        "{}=\"{}\"",
+                        key,
+                        value
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"")
+                            .replace('\n', "\\n")
+                    )
+                } else {
+                    format!("{}={}", key, value)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n")),
-        ExportFormat::Json => serde_json::to_string(&secrets).map_err(|e| e.to_string()),
+        ExportFormat::Json => {
+            let json_map: serde_json::Map<String, serde_json::Value> = secrets
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            serde_json::to_string(&json_map).map_err(|e| e.to_string())
+        }
         ExportFormat::Eval => Ok(secrets
             .iter()
-            .map(|(key, value)| {
-                format!(
-                    "export {}={}",
-                    key,
-                    shell_quote(value.as_str().unwrap_or(""))
-                )
-            })
+            .map(|(key, value)| format!("export {}={}", key, shell_quote(value)))
             .collect::<Vec<_>>()
             .join("\n")),
     }
@@ -717,31 +712,7 @@ pub fn cmd_push(
     environment: Option<&str>,
 ) -> Result<String, String> {
     let environment = environment.unwrap_or("production");
-    let secrets = if is_daemon_running() {
-        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
-        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(response_error(&response));
-        }
-        response["secrets"].as_object().cloned().unwrap_or_default()
-    } else {
-        let password = prompt_password("Master password: ")?;
-        let vault = unlock_vault(&password)?;
-        let project_entry = vault
-            .projects
-            .iter()
-            .find(|entry| entry.name == project)
-            .ok_or_else(|| format!("project not found: {project}"))?;
-        project_entry
-            .secrets
-            .iter()
-            .map(|secret| {
-                (
-                    secret.key.clone(),
-                    serde_json::Value::String(secret.value.clone()),
-                )
-            })
-            .collect()
-    };
+    let secrets = get_project_secret_map(project)?;
 
     if !matches!(target, PushTarget::Vercel) && environment != "production" {
         eprintln!(
@@ -752,7 +723,7 @@ pub fn cmd_push(
 
     for (key, value) in &secrets {
         eprintln!("Pushing {} to {}...", key, push_target_name(target));
-        let mut cmd = platform_command(target, key, value.as_str().unwrap_or(""), environment);
+        let mut cmd = platform_command(target, key, value, environment);
         cmd.status().map_err(|e| {
             format!(
                 "{} CLI not found or failed to run: {}",
@@ -924,13 +895,13 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
             config.keys.required
         } else {
             let password = prompt_password("Master password: ")?;
-            let vault = unlock_vault(&password)?;
-            list_secret_keys(&vault, &project)?
+            let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+            list_secret_keys(&vault, &project).map_err(|e| e.to_string())?
         }
     } else {
         let password = prompt_password("Master password: ")?;
-        let vault = unlock_vault(&password)?;
-        list_secret_keys(&vault, &project)?
+        let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+        list_secret_keys(&vault, &project).map_err(|e| e.to_string())?
     };
 
     let config = ProjectConfig {
@@ -951,7 +922,17 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
             .collect::<Vec<_>>()
             .join("\n")
     );
-    fs::write("AGENTS.md", agents).map_err(|e| e.to_string())?;
+    let agents_path = Path::new("AGENTS.md");
+    if agents_path.exists() {
+        let existing = fs::read_to_string(agents_path).map_err(|e| e.to_string())?;
+        if !existing.contains("This project uses LokalVault for secrets management.") {
+            return Err(
+                "AGENTS.md already exists and was not generated by LokalVault; refusing to overwrite"
+                    .to_string(),
+            );
+        }
+    }
+    fs::write(agents_path, agents).map_err(|e| e.to_string())?;
 
     ensure_ai_safe_gitignore()?;
 
@@ -978,38 +959,14 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
 
 pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
     let share_password = prompt_password("Share password: ")?;
-    let secrets = if is_daemon_running() {
-        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
-        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(response_error(&response));
-        }
-        response["secrets"].as_object().cloned().unwrap_or_default()
-    } else {
-        let password = prompt_password("Master password: ")?;
-        let vault = unlock_vault(&password)?;
-        let project_entry = vault
-            .projects
-            .iter()
-            .find(|entry| entry.name == project)
-            .ok_or_else(|| format!("project not found: {project}"))?;
-        project_entry
-            .secrets
-            .iter()
-            .map(|secret| {
-                (
-                    secret.key.clone(),
-                    serde_json::Value::String(secret.value.clone()),
-                )
-            })
-            .collect()
-    };
+    let secrets = get_project_secret_map(project)?;
 
     let payload = serde_json::json!({
         "project": project,
         "shared_at": chrono::Utc::now().to_rfc3339(),
         "secrets": secrets
             .into_iter()
-            .map(|(key, value)| json!({ "key": key, "value": value.as_str().unwrap_or("") }))
+            .map(|(key, value)| json!({ "key": key, "value": value }))
             .collect::<Vec<_>>()
     });
     let output_path = output
@@ -1033,13 +990,13 @@ pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
         .ok_or_else(|| "missing project in share payload".to_string())?;
 
     let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password)?;
+    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     if !vault
         .projects
         .iter()
         .any(|entry| entry.name == project_name)
     {
-        add_project(&mut vault, &project_name)?;
+        add_project(&mut vault, &project_name).map_err(|e| e.to_string())?;
     }
 
     let secrets = payload
@@ -1085,7 +1042,7 @@ pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String
             .collect::<Vec<_>>()
     } else {
         let password = prompt_password("Master password: ")?;
-        let vault = unlock_vault(&password)?;
+        let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
         let project_entry = vault
             .projects
             .iter()
@@ -1168,7 +1125,7 @@ fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, Stri
     }
 
     let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password)?;
+    let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
     let project_entry = vault
         .projects
         .iter()

@@ -5,6 +5,7 @@ use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, 
 use chrono::Utc;
 use std::fs;
 use std::path::Path;
+use zeroize::Zeroize;
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSummary {
@@ -18,9 +19,11 @@ pub struct ImportResult {
     pub skipped: usize,
 }
 
-pub fn create_vault(password: &str) -> Result<(), String> {
+pub fn create_vault(password: &str) -> Result<(), AppError> {
     if get_vault_path().exists() {
-        return Err(AppError::ValidationError("vault already exists".to_string()).to_string());
+        return Err(AppError::ValidationError(
+            "vault already exists".to_string(),
+        ));
     }
 
     let (memory_kb, iterations, parallelism) = benchmark_argon2();
@@ -30,41 +33,23 @@ pub fn create_vault(password: &str) -> Result<(), String> {
     settings.argon2_parallelism = parallelism;
     write_settings(&settings)?;
 
-    write_vault(&VaultData::new(), password)
+    write_vault(&VaultData::new(), password)?;
+    Ok(())
 }
 
-pub fn unlock_vault(password: &str) -> Result<VaultData, String> {
-    read_vault(password)
+pub fn unlock_vault(password: &str) -> Result<VaultData, AppError> {
+    Ok(read_vault(password)?)
 }
 
 pub fn lock_vault(vault: &mut VaultData) {
-    for project in &mut vault.projects {
-        for byte in unsafe { project.name.as_mut_vec() } {
-            *byte = 0;
-        }
-        project.name.clear();
-
-        for secret in &mut project.secrets {
-            for byte in unsafe { secret.key.as_mut_vec() } {
-                *byte = 0;
-            }
-            secret.key.clear();
-
-            for byte in unsafe { secret.value.as_mut_vec() } {
-                *byte = 0;
-            }
-            secret.value.clear();
-        }
-        project.secrets.clear();
-    }
-    vault.projects.clear();
+    vault.zeroize();
 }
 
-pub fn add_project(vault: &mut VaultData, name: &str) -> Result<(), String> {
+pub fn add_project(vault: &mut VaultData, name: &str) -> Result<(), AppError> {
     validate_project_name(name)?;
 
     if vault.projects.iter().any(|project| project.name == name) {
-        return Err(AppError::ProjectAlreadyExists(name.to_string()).to_string());
+        return Err(AppError::ProjectAlreadyExists(name.to_string()));
     }
 
     vault.projects.push(Project {
@@ -75,12 +60,12 @@ pub fn add_project(vault: &mut VaultData, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn delete_project(vault: &mut VaultData, name: &str) -> Result<(), String> {
+pub fn delete_project(vault: &mut VaultData, name: &str) -> Result<(), AppError> {
     let index = vault
         .projects
         .iter()
         .position(|project| project.name == name)
-        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()).to_string())?;
+        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()))?;
 
     vault.projects.remove(index);
     Ok(())
@@ -91,12 +76,12 @@ pub fn add_secret(
     project: &str,
     key: &str,
     value: &str,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     validate_secret_key(key)?;
 
     let project = find_project_mut(vault, project)?;
     if project.secrets.iter().any(|secret| secret.key == key) {
-        return Err(AppError::SecretAlreadyExists(key.to_string()).to_string());
+        return Err(AppError::SecretAlreadyExists(key.to_string()));
     }
 
     project.secrets.push(Secret {
@@ -114,7 +99,7 @@ pub fn update_secret(
     project: &str,
     key: &str,
     value: &str,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     validate_secret_key(key)?;
 
     let project = find_project_mut(vault, project)?;
@@ -122,20 +107,20 @@ pub fn update_secret(
         .secrets
         .iter_mut()
         .find(|secret| secret.key == key)
-        .ok_or_else(|| AppError::SecretNotFound(key.to_string()).to_string())?;
+        .ok_or_else(|| AppError::SecretNotFound(key.to_string()))?;
 
     secret.value = value.to_string();
     secret.updated_at = Utc::now().to_rfc3339();
     Ok(())
 }
 
-pub fn delete_secret(vault: &mut VaultData, project: &str, key: &str) -> Result<(), String> {
+pub fn delete_secret(vault: &mut VaultData, project: &str, key: &str) -> Result<(), AppError> {
     let project = find_project_mut(vault, project)?;
     let index = project
         .secrets
         .iter()
         .position(|secret| secret.key == key)
-        .ok_or_else(|| AppError::SecretNotFound(key.to_string()).to_string())?;
+        .ok_or_else(|| AppError::SecretNotFound(key.to_string()))?;
 
     project.secrets.remove(index);
     Ok(())
@@ -152,12 +137,12 @@ pub fn list_projects(vault: &VaultData) -> Vec<ProjectSummary> {
         .collect()
 }
 
-pub fn list_secret_keys(vault: &VaultData, project: &str) -> Result<Vec<String>, String> {
+pub fn list_secret_keys(vault: &VaultData, project: &str) -> Result<Vec<String>, AppError> {
     let project = vault
         .projects
         .iter()
         .find(|item| item.name == project)
-        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()).to_string())?;
+        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()))?;
 
     Ok(project
         .secrets
@@ -170,7 +155,7 @@ pub fn import_dotenv(
     vault: &mut VaultData,
     project: &str,
     path: &Path,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, AppError> {
     let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut imported = 0;
     let mut skipped = 0;
@@ -182,7 +167,7 @@ pub fn import_dotenv(
         }
 
         let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key.trim(), value.trim()),
+            Some((key, value)) => (key.trim(), strip_surrounding_quotes(value.trim())),
             None => {
                 skipped += 1;
                 continue;
@@ -203,25 +188,25 @@ pub fn import_dotenv(
     Ok(ImportResult { imported, skipped })
 }
 
-pub fn change_master_password(vault: &VaultData, current: &str, new: &str) -> Result<(), String> {
+pub fn change_master_password(vault: &VaultData, current: &str, new: &str) -> Result<(), AppError> {
     read_vault(current)?;
-    write_vault(vault, new)
+    write_vault(vault, new)?;
+    Ok(())
 }
 
-fn find_project_mut<'a>(vault: &'a mut VaultData, name: &str) -> Result<&'a mut Project, String> {
+fn find_project_mut<'a>(vault: &'a mut VaultData, name: &str) -> Result<&'a mut Project, AppError> {
     vault
         .projects
         .iter_mut()
         .find(|project| project.name == name)
-        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()).to_string())
+        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()))
 }
 
-fn validate_project_name(name: &str) -> Result<(), String> {
+fn validate_project_name(name: &str) -> Result<(), AppError> {
     if name.is_empty() || name.len() > 64 {
         return Err(AppError::InvalidProjectName(
             "project name must be 1-64 characters".to_string(),
-        )
-        .to_string());
+        ));
     }
 
     if !name
@@ -230,18 +215,27 @@ fn validate_project_name(name: &str) -> Result<(), String> {
     {
         return Err(AppError::InvalidProjectName(
             "project names may contain only letters, numbers, and hyphens".to_string(),
-        )
-        .to_string());
+        ));
     }
 
     Ok(())
 }
 
-fn validate_secret_key(key: &str) -> Result<(), String> {
+fn strip_surrounding_quotes(s: &str) -> &str {
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+fn validate_secret_key(key: &str) -> Result<(), AppError> {
     if key.is_empty() {
-        return Err(
-            AppError::InvalidSecretKey("secret key cannot be empty".to_string()).to_string(),
-        );
+        return Err(AppError::InvalidSecretKey(
+            "secret key cannot be empty".to_string(),
+        ));
     }
 
     if !key
@@ -250,8 +244,7 @@ fn validate_secret_key(key: &str) -> Result<(), String> {
     {
         return Err(AppError::InvalidSecretKey(
             "secret keys must be SCREAMING_SNAKE_CASE".to_string(),
-        )
-        .to_string());
+        ));
     }
 
     Ok(())
@@ -260,15 +253,8 @@ fn validate_secret_key(key: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault_file::{Project, Secret, get_vault_path};
-    use std::sync::Mutex;
-
-    static VAULT_OPS_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn cleanup() {
-        let _ = fs::remove_file(get_vault_path());
-        let _ = fs::remove_file(get_vault_path().with_extension("lv.tmp"));
-    }
+    use crate::test_utils::{DATA_DIR_LOCK, cleanup_test_dir, setup_test_dir};
+    use crate::vault_file::{Project, Secret};
 
     fn sample_vault() -> VaultData {
         VaultData {
@@ -287,43 +273,40 @@ mod tests {
 
     #[test]
     fn test_create_vault_and_unlock_vault() {
-        let _guard = VAULT_OPS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         create_vault("password").unwrap();
         let vault = unlock_vault("password").unwrap();
 
         assert_eq!(vault.version, 1);
         assert!(vault.projects.is_empty());
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_create_vault_rejects_existing_vault() {
-        let _guard = VAULT_OPS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         create_vault("password").unwrap();
         let error = create_vault("password").unwrap_err();
 
-        assert_eq!(error, "vault already exists");
-        cleanup();
+        assert_eq!(error.to_string(), "vault already exists");
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_unlock_vault_rejects_wrong_password() {
-        let _guard = VAULT_OPS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         create_vault("password").unwrap();
         assert!(unlock_vault("wrong-password").is_err());
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
@@ -349,7 +332,7 @@ mod tests {
         add_project(&mut vault, "my-app").unwrap();
 
         let error = add_project(&mut vault, "my-app").unwrap_err();
-        assert_eq!(error, "project already exists: my-app");
+        assert_eq!(error.to_string(), "project already exists: my-app");
     }
 
     #[test]
@@ -358,7 +341,7 @@ mod tests {
         let error = add_project(&mut vault, "bad name").unwrap_err();
 
         assert_eq!(
-            error,
+            error.to_string(),
             "project names may contain only letters, numbers, and hyphens"
         );
     }
@@ -377,7 +360,7 @@ mod tests {
         let mut vault = VaultData::new();
         let error = delete_project(&mut vault, "missing").unwrap_err();
 
-        assert_eq!(error, "project not found: missing");
+        assert_eq!(error.to_string(), "project not found: missing");
     }
 
     #[test]
@@ -394,7 +377,7 @@ mod tests {
         let mut vault = sample_vault();
         let error = add_secret(&mut vault, "my-app", "OPENAI_KEY", "other").unwrap_err();
 
-        assert_eq!(error, "secret already exists: OPENAI_KEY");
+        assert_eq!(error.to_string(), "secret already exists: OPENAI_KEY");
     }
 
     #[test]
@@ -403,7 +386,10 @@ mod tests {
         add_project(&mut vault, "my-app").unwrap();
 
         let error = add_secret(&mut vault, "my-app", "badKey", "value").unwrap_err();
-        assert_eq!(error, "secret keys must be SCREAMING_SNAKE_CASE");
+        assert_eq!(
+            error.to_string(),
+            "secret keys must be SCREAMING_SNAKE_CASE"
+        );
     }
 
     #[test]
@@ -419,7 +405,7 @@ mod tests {
         let mut vault = sample_vault();
         let error = update_secret(&mut vault, "my-app", "MISSING_KEY", "value").unwrap_err();
 
-        assert_eq!(error, "secret not found: MISSING_KEY");
+        assert_eq!(error.to_string(), "secret not found: MISSING_KEY");
     }
 
     #[test]
@@ -435,7 +421,7 @@ mod tests {
         let mut vault = sample_vault();
         let error = delete_secret(&mut vault, "my-app", "MISSING_KEY").unwrap_err();
 
-        assert_eq!(error, "secret not found: MISSING_KEY");
+        assert_eq!(error.to_string(), "secret not found: MISSING_KEY");
     }
 
     #[test]
@@ -458,10 +444,9 @@ mod tests {
 
     #[test]
     fn test_import_dotenv_imports_valid_lines_and_skips_invalid_lines() {
-        let _guard = VAULT_OPS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        cleanup();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
 
         let mut vault = VaultData::new();
         add_project(&mut vault, "my-app").unwrap();
@@ -480,16 +465,15 @@ mod tests {
         assert_eq!(vault.projects[0].secrets.len(), 2);
 
         let _ = fs::remove_file(dotenv_path);
-        cleanup();
+        cleanup_test_dir("unit");
     }
 
     #[test]
     fn test_change_master_password_reencrypts_vault() {
         for _ in 0..3 {
-            let _guard = VAULT_OPS_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cleanup();
+            let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            cleanup_test_dir("unit");
+            setup_test_dir("unit");
 
             let vault = sample_vault();
             write_vault(&vault, "old-password").unwrap();
@@ -500,11 +484,11 @@ mod tests {
                 && let Ok(reloaded) = unlock_vault("new-password")
             {
                 assert_eq!(reloaded.projects[0].secrets[0].value, "test-value-123");
-                cleanup();
+                cleanup_test_dir("unit");
                 return;
             }
 
-            cleanup();
+            cleanup_test_dir("unit");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 

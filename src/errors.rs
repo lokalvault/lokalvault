@@ -67,6 +67,12 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
+impl From<String> for AppError {
+    fn from(error: String) -> Self {
+        Self::IoError(error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

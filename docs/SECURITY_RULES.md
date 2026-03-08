@@ -15,17 +15,19 @@ All other files call functions from `crypto.rs`.
 
 ---
 
-## RULE 2 — Never store the master password
+## RULE 2 — Never transmit or persist the master password
 
-The master password is used ONCE to derive a key via Argon2id.
-After key derivation:
-- The password string is dropped immediately
-- It is never written to disk
-- It is never stored in a struct
-- It is never sent over IPC
-- It is never logged
+The master password is used ONCE at vault creation and ONCE at unlock.
 
-If you find yourself storing a password string: stop. You're doing it wrong.
+After unlock:
+- The daemon may hold the password in RAM (DaemonState) for write operations
+- It is NEVER written to disk
+- It is NEVER sent over IPC from CLI → daemon
+- It is NEVER logged
+- It is dropped when the daemon shuts down or the vault locks
+
+The daemon is the ONLY process that may hold the password in memory.
+No CLI process, no Tauri renderer, no SDK may ever receive it.
 
 ---
 
@@ -209,7 +211,7 @@ PID is only available AFTER spawn.
 These two facts create an ordering paradox.
 
 The ONLY correct solution:
-1. Phase 1: register token with daemon (no PID yet, 1000ms window)
+1. Phase 1: register token with daemon (no PID yet, a configurably short window)
 2. Spawn child with token in env
 3. Phase 2: send PID to daemon (bind token to PID)
 
@@ -225,11 +227,47 @@ intercept all SDK connections before the daemon starts.
 
 ---
 
+## RULE 15 — scan-diff must never store the full secret list longer than the comparison
+
+Wrap the secret fetch and comparison in an explicit scope:
+  {
+      let secrets = fetch_secrets_for_project(...);
+      let result = check_diff_against_secrets(&diff, &secrets);
+      // secrets dropped here at end of scope
+  }
+
+Never assign the secret map to a variable that outlives the comparison.
+Never cache it in DaemonState between requests.
+
+---
+
+## RULE 16 — .lve share files must not embed the project password
+
+The share password is ephemeral and separate from the master password.
+Never derive the share key from the master password or stored key material.
+Fresh Argon2id derivation only, fresh salt per share operation.
+
+---
+
+## RULE 17 — Daemon password is zeroized on lock and shutdown
+
+When stop_daemon() is called (lock, timeout, or shutdown IPC):
+  DaemonState.password must be zeroized before the struct is dropped.
+  Use Zeroizing<String> for the password field, not plain String.
+  This is the in-memory counterpart to Rule 2's disk/IPC prohibition.
+
+---
+
 ## NEVER DO THIS LIST
 
 ```rust
-// ✗ Storing password
-struct AppState { password: String }
+// ✗ Storing password in CLI or UI process
+struct CliState { password: String }
+
+// ✗ Persisting password to disk
+serde_json::to_string(&state_with_password)?;
+
+// ✓ Only DaemonState may hold password in RAM, never CLI/Tauri/SDK
 
 // ✗ Reusing nonce
 let nonce = [0u8; 12]; // hardcoded!

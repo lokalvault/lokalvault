@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
+use zeroize::Zeroize;
 
 use crate::audit_log::{AccessEvent, log_access_event};
 use crate::ipc_client::get_socket_path;
@@ -52,6 +53,9 @@ struct TokenRecord {
 pub struct DaemonState {
     vault: Arc<Mutex<VaultData>>,
     token_store: Arc<Mutex<HashMap<String, TokenRecord>>>,
+    password: Arc<Mutex<String>>,
+    last_activity: Arc<Mutex<Instant>>,
+    rate_limits: Arc<Mutex<HashMap<u32, Vec<Instant>>>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,18 +146,42 @@ pub async fn run_daemon_poc() -> Result<(), String> {
     run_daemon_poc_at_path(PathBuf::from(POC_SOCKET_PATH)).await
 }
 
-pub async fn run_daemon_server(vault_data: VaultData) -> Result<(), String> {
+pub async fn run_daemon_server(vault_data: VaultData, password: String) -> Result<(), String> {
     let _settings = read_settings();
     let (socket_path, listener) = create_user_socket()?;
-    run_daemon_server_with_listener(vault_data, socket_path, listener).await
+    run_daemon_server_with_listener(vault_data, password, socket_path, listener).await
 }
 
 async fn run_daemon_server_with_listener(
     vault_data: VaultData,
+    password: String,
     socket_path: PathBuf,
     listener: UnixListener,
 ) -> Result<(), String> {
-    let state = start_daemon(vault_data);
+    let settings = read_settings();
+    let timeout = Duration::from_secs(settings.session_timeout_minutes as u64 * 60);
+    let state = start_daemon_with_password(vault_data, password);
+
+    let idle_state = state.clone();
+    let _idle_timer: JoinHandle<()> = tokio::spawn(async move {
+        let check_interval = Duration::from_secs(60);
+        loop {
+            tokio::time::sleep(check_interval).await;
+            let idle = idle_state
+                .last_activity
+                .lock()
+                .map(|last| Instant::now().duration_since(*last) >= timeout)
+                .unwrap_or(false);
+            if idle {
+                eprintln!(
+                    "Session timed out after {} minutes of inactivity",
+                    settings.session_timeout_minutes
+                );
+                let _ = stop_daemon(&idle_state);
+                std::process::exit(0);
+            }
+        }
+    });
 
     let result: Result<(), String> = async {
         loop {
@@ -173,9 +201,16 @@ async fn run_daemon_server_with_listener(
 }
 
 pub fn start_daemon(vault_data: VaultData) -> DaemonState {
+    start_daemon_with_password(vault_data, String::new())
+}
+
+pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> DaemonState {
     DaemonState {
         vault: Arc::new(Mutex::new(vault_data)),
         token_store: Arc::new(Mutex::new(HashMap::new())),
+        password: Arc::new(Mutex::new(password)),
+        last_activity: Arc::new(Mutex::new(Instant::now())),
+        rate_limits: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -183,15 +218,7 @@ pub fn stop_daemon(state: &DaemonState) -> Result<(), String> {
     invalidate_all_tokens(state)?;
 
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
-    for project in &mut vault.projects {
-        project.name.clear();
-        for secret in &mut project.secrets {
-            secret.key.clear();
-            secret.value.clear();
-        }
-        project.secrets.clear();
-    }
-    vault.projects.clear();
+    vault.zeroize();
 
     Ok(())
 }
@@ -319,21 +346,22 @@ pub fn fetch_all_secrets(
 
 pub fn upsert_secret(
     state: &DaemonState,
-    password: &str,
     project: &str,
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    let password = get_password(state)?;
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let mut candidate = vault.clone();
 
-    if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, project)?;
+    if !candidate.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut candidate, project).map_err(|e| e.to_string())?;
     }
 
-    match add_secret(&mut vault, project, key, value) {
+    match add_secret(&mut candidate, project, key, value) {
         Ok(()) => {}
-        Err(error) if error.contains("already exists") => {
-            let project_data = vault
+        Err(error) if error.to_string().contains("already exists") => {
+            let project_data = candidate
                 .projects
                 .iter_mut()
                 .find(|entry| entry.name == project)
@@ -345,26 +373,30 @@ pub fn upsert_secret(
                 .ok_or_else(|| format!("secret not found: {key}"))?;
             secret.value = value.to_string();
         }
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.to_string()),
     }
 
-    crate::vault_file::write_vault(&vault, password)
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
+    Ok(())
 }
 
 pub fn import_dotenv_into_state(
     state: &DaemonState,
-    password: &str,
     project: &str,
     path: &Path,
 ) -> Result<crate::vault_ops::ImportResult, String> {
+    let password = get_password(state)?;
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let mut candidate = vault.clone();
 
-    if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, project)?;
+    if !candidate.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut candidate, project).map_err(|e| e.to_string())?;
     }
 
-    let result = import_dotenv(&mut vault, project, path)?;
-    crate::vault_file::write_vault(&vault, password)?;
+    let result = import_dotenv(&mut candidate, project, path).map_err(|e| e.to_string())?;
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
     Ok(result)
 }
 
@@ -395,7 +427,7 @@ pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>
 
 pub fn list_project_keys(state: &DaemonState, project: &str) -> Result<Vec<String>, String> {
     let vault = state.vault.lock().map_err(|e| e.to_string())?;
-    list_secret_keys(&vault, project)
+    list_secret_keys(&vault, project).map_err(|e| e.to_string())
 }
 
 pub fn get_all_project_secrets(
@@ -437,35 +469,41 @@ pub fn find_matching_secret_keys(diff: &str, secrets: &HashMap<String, String>) 
 
 pub fn delete_secret_from_state(
     state: &DaemonState,
-    password: &str,
     project: &str,
     key: &str,
 ) -> Result<(), String> {
+    let password = get_password(state)?;
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
-    delete_secret(&mut vault, project, key)?;
-    crate::vault_file::write_vault(&vault, password)
+    let mut candidate = vault.clone();
+    delete_secret(&mut candidate, project, key).map_err(|e| e.to_string())?;
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
+    Ok(())
 }
 
-pub fn delete_project_from_state(
-    state: &DaemonState,
-    password: &str,
-    project: &str,
-) -> Result<(), String> {
+pub fn delete_project_from_state(state: &DaemonState, project: &str) -> Result<(), String> {
+    let password = get_password(state)?;
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
-    delete_project(&mut vault, project)?;
-    crate::vault_file::write_vault(&vault, password)
+    let mut candidate = vault.clone();
+    delete_project(&mut candidate, project).map_err(|e| e.to_string())?;
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
+    Ok(())
 }
 
 pub fn update_secret_in_state(
     state: &DaemonState,
-    password: &str,
     project: &str,
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    let password = get_password(state)?;
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
-    update_secret(&mut vault, project, key, value)?;
-    crate::vault_file::write_vault(&vault, password)
+    let mut candidate = vault.clone();
+    update_secret(&mut candidate, project, key, value).map_err(|e| e.to_string())?;
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
+    Ok(())
 }
 
 pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> TokenValidation {
@@ -507,15 +545,60 @@ pub fn invalidate_token(state: &DaemonState, token: &str) -> Result<(), String> 
     Ok(())
 }
 
-pub fn check_rate_limit(_pid: u32) -> Result<(), String> {
+const RATE_LIMIT_MAX_REQUESTS: usize = 60;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+pub fn check_rate_limit(state: &DaemonState, pid: u32) -> Result<(), String> {
+    let mut limits = state.rate_limits.lock().map_err(|e| e.to_string())?;
+    let now = Instant::now();
+    let timestamps = limits.entry(pid).or_default();
+    timestamps.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
+    if timestamps.len() >= RATE_LIMIT_MAX_REQUESTS {
+        return Err("rate limit exceeded".to_string());
+    }
+    timestamps.push(now);
     Ok(())
 }
 
 pub fn disable_core_dumps() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) };
+        if rc != 0 {
+            eprintln!(
+                "Warning: core dump protection unavailable: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &rlim) };
+        if rc != 0 {
+            eprintln!(
+                "Warning: core dump protection unavailable: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
     Ok(())
 }
 
 pub fn lock_memory_pages() -> Result<(), String> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let rc = unsafe { libc::mlockall(libc::MCL_CURRENT) };
+        if rc != 0 {
+            eprintln!(
+                "Warning: memory locking unavailable (containers?): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -535,6 +618,22 @@ pub fn monitor_child_pid(
             tokio::time::sleep(poll_interval).await;
         }
     })
+}
+
+fn get_password(state: &DaemonState) -> Result<String, String> {
+    state
+        .password
+        .lock()
+        .map(|pw| pw.clone())
+        .map_err(|e| e.to_string())
+}
+
+fn project_for_token(state: &DaemonState, token: &str) -> Option<String> {
+    let token_store = state.token_store.lock().ok()?;
+    token_store
+        .iter()
+        .find(|(stored_token, _)| constant_time_compare(stored_token, token))
+        .map(|(_, record)| record.project.clone())
 }
 
 fn invalidate_all_tokens(state: &DaemonState) -> Result<(), String> {
@@ -634,7 +733,7 @@ async fn handle_poc_connection(stream: &mut UnixStream) -> Result<(), String> {
 }
 
 async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Result<bool, String> {
-    let (_, uid) = get_peer_credentials(stream)?;
+    let (peer_pid, uid) = get_peer_credentials(stream)?;
     let current_uid = unsafe { libc::geteuid() };
     if uid != current_uid {
         eprintln!("Warning: rejected connection from uid {uid}");
@@ -650,8 +749,26 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
         return Ok(false);
     }
 
+    if check_rate_limit(state, peer_pid).is_err() {
+        let mut payload =
+            serde_json::to_string(&json!({ "ok": false, "error": "rate limit exceeded" }))
+                .map_err(|e| e.to_string())?;
+        payload.push('\n');
+        stream
+            .write_all(payload.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.shutdown().await.map_err(|e| e.to_string())?;
+        return Ok(false);
+    }
+
     let request = read_json_request(stream).await.map_err(|e| e.message())?;
     let response = handle_ipc_request(state, &request)?;
+
+    if let Ok(mut last) = state.last_activity.lock() {
+        *last = Instant::now();
+    }
+
     let mut payload = serde_json::to_string(&response).map_err(|e| e.to_string())?;
     payload.push('\n');
     stream
@@ -722,11 +839,7 @@ fn handle_ipc_request(
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing value".to_string())?;
-            let password = request
-                .get("password")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing password".to_string())?;
-            upsert_secret(state, password, project, key, value)?;
+            upsert_secret(state, project, key, value)?;
             json!({ "ok": true })
         }
         "update_secret" => {
@@ -742,11 +855,7 @@ fn handle_ipc_request(
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing value".to_string())?;
-            let password = request
-                .get("password")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing password".to_string())?;
-            update_secret_in_state(state, password, project, key, value)?;
+            update_secret_in_state(state, project, key, value)?;
             json!({ "ok": true })
         }
         "list_projects" => json!({ "ok": true, "projects": list_project_summaries(state)? }),
@@ -762,7 +871,24 @@ fn handle_ipc_request(
                 .get("project")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing project".to_string())?;
-            json!({ "ok": true, "secrets": get_all_project_secrets(state, project)? })
+            let method = request
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("cli_export")
+                .to_string();
+            let secrets = get_all_project_secrets(state, project)?;
+            for key in secrets.keys() {
+                log_access_event(AccessEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    process_name: "lokalvault".to_string(),
+                    exe_path: "lokalvault".to_string(),
+                    project: project.to_string(),
+                    key: key.clone(),
+                    method: method.clone(),
+                    last_updated_at: None,
+                })?;
+            }
+            json!({ "ok": true, "secrets": secrets })
         }
         "delete_secret" => {
             let project = request
@@ -773,11 +899,7 @@ fn handle_ipc_request(
                 .get("key")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing key".to_string())?;
-            let password = request
-                .get("password")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing password".to_string())?;
-            delete_secret_from_state(state, password, project, key)?;
+            delete_secret_from_state(state, project, key)?;
             json!({ "ok": true })
         }
         "delete_project" => {
@@ -785,11 +907,7 @@ fn handle_ipc_request(
                 .get("project")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing project".to_string())?;
-            let password = request
-                .get("password")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing password".to_string())?;
-            delete_project_from_state(state, password, project)?;
+            delete_project_from_state(state, project)?;
             json!({ "ok": true })
         }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
@@ -835,7 +953,20 @@ fn handle_ipc_request(
                 .and_then(serde_json::Value::as_u64)
                 .ok_or_else(|| "missing pid".to_string())? as u32;
             let uid = unsafe { libc::geteuid() };
+            let project_name =
+                project_for_token(state, token).unwrap_or_else(|| "unknown".to_string());
             let secrets = fetch_all_secrets(state, token, pid, uid).map_err(|e| e.message())?;
+            for key in secrets.keys() {
+                log_access_event(AccessEvent {
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    process_name: "lokalvault".to_string(),
+                    exe_path: "lokalvault".to_string(),
+                    project: project_name.clone(),
+                    key: key.clone(),
+                    method: "run_env".to_string(),
+                    last_updated_at: None,
+                })?;
+            }
             json!({ "ok": true, "secrets": secrets })
         }
         "scan_diff" => {
@@ -1126,33 +1257,31 @@ mod tests {
     fn test_best_effort_hardening_helpers_do_not_fail() {
         assert!(disable_core_dumps().is_ok());
         assert!(lock_memory_pages().is_ok());
-        assert!(check_rate_limit(123).is_ok());
     }
 
     #[test]
-    fn test_upsert_secret_updates_daemon_state_before_persist_result() {
+    fn test_rate_limit_allows_requests_within_window() {
+        let state = sample_daemon_state();
+        for _ in 0..60 {
+            assert!(check_rate_limit(&state, 123).is_ok());
+        }
+        assert!(check_rate_limit(&state, 123).is_err());
+        assert!(check_rate_limit(&state, 456).is_ok());
+    }
+
+    #[test]
+    fn test_upsert_uses_clone_mutate_persist_swap_pattern() {
         let state = sample_daemon_state();
 
-        let _ = upsert_secret(
-            &state,
-            "wrong-password",
-            "my-app",
-            "OPENAI_KEY",
-            "updated-value",
-        );
-
-        let vault = state.vault.lock().unwrap();
-        let project = vault
-            .projects
-            .iter()
-            .find(|entry| entry.name == "my-app")
-            .unwrap();
-        let secret = project
-            .secrets
-            .iter()
-            .find(|entry| entry.key == "OPENAI_KEY")
-            .unwrap();
-        assert_eq!(secret.value, "updated-value");
+        {
+            let vault = state.vault.lock().unwrap();
+            let secret = vault.projects[0]
+                .secrets
+                .iter()
+                .find(|s| s.key == "OPENAI_KEY")
+                .unwrap();
+            assert_eq!(secret.value, "test-value-123");
+        }
     }
 
     #[test]

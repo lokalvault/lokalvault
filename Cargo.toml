@@ -24,6 +24,7 @@ clap_complete = "4"
 toml = "0.8"
 arboard = "3"
 notify = "6"
+zxcvbn = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

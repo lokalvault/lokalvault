@@ -83,6 +83,36 @@ pub fn constant_time_compare(a: &str, b: &str) -> bool {
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum PasswordStrength {
+    TooShort,
+    Weak,
+    Fair,
+    Strong,
+    VeryStrong,
+}
+
+pub fn validate_password_strength(password: &str) -> (PasswordStrength, String) {
+    if password.len() < 8 {
+        return (
+            PasswordStrength::TooShort,
+            "password must be at least 8 characters".to_string(),
+        );
+    }
+    let estimate = zxcvbn::zxcvbn(password, &[]);
+    match estimate.score() {
+        zxcvbn::Score::Zero | zxcvbn::Score::One => {
+            (PasswordStrength::Weak, "password is too weak".to_string())
+        }
+        zxcvbn::Score::Two => (
+            PasswordStrength::Fair,
+            "password could be stronger".to_string(),
+        ),
+        zxcvbn::Score::Three => (PasswordStrength::Strong, String::new()),
+        _ => (PasswordStrength::VeryStrong, String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

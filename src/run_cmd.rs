@@ -270,8 +270,8 @@ async fn run_with_real_daemon(
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
-    let random = generate_token();
-    let code = &random[0..2];
+    use rand::Rng;
+    let code = format!("{:02}", rand::thread_rng().gen_range(0u8..=99));
     print!("Type [{code}] to allow access to '{project}': ");
     io::stdout().flush().map_err(|e| e.to_string())?;
 
@@ -416,6 +416,10 @@ async fn wait_with_signal_passthrough(
     child: &mut Child,
     mut watch_rx: Option<&mut watch::Receiver<bool>>,
 ) -> Result<std::process::ExitStatus, String> {
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|e| e.to_string())?;
+
     loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             return Ok(status);
@@ -429,24 +433,15 @@ async fn wait_with_signal_passthrough(
         }
 
         #[cfg(unix)]
-        {
-            let mut interrupt =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                    .map_err(|e| e.to_string())?;
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                _ = interrupt.recv() => {
-                    forward_interrupt(child)?;
-                }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            _ = interrupt.recv() => {
+                forward_interrupt(child)?;
             }
         }
 
         #[cfg(not(unix))]
-        {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-            }
-        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         if let Some(rx) = &mut watch_rx
             && rx.has_changed().unwrap_or(false)
