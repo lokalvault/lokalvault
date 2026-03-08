@@ -1,3 +1,4 @@
+use crate::crypto::constant_time_compare;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -267,7 +268,10 @@ pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> T
         Err(_) => return TokenValidation::InvalidToken,
     };
 
-    let Some(record) = token_store.get(token) else {
+    let Some((_, record)) = token_store
+        .iter()
+        .find(|(stored_token, _)| constant_time_compare(stored_token, token))
+    else {
         return TokenValidation::InvalidToken;
     };
 

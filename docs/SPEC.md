@@ -1148,11 +1148,13 @@ The Tauri + React UI is a later thin layer over the same Rust modules, not the s
 - `src/vault_ops.rs` ✅ complete
 - integration test scaffolding in `src/lib.rs` and `tests/` ✅ complete
 - `src/errors.rs` ✅ complete
-- real `src/daemon.rs` ✅ groundwork complete
-- real `src/run_cmd.rs` ✅ groundwork complete
+- real `src/daemon.rs` ✅ complete
+- real `src/run_cmd.rs` ✅ complete
 
-Phase 1A is not complete until the real run flow uses phase1 -> spawn -> phase2 ordering,
-terminal approval is non-deterministic, and integration tests prove the token-aware cross-module path.
+Phase 1A completion result in current repository snapshot:
+- real run flow now uses phase1 -> spawn -> phase2 ordering
+- terminal approval uses a non-deterministic code
+- integration tests prove the token-aware cross-module path
 
 ### Phase 1B — Full CLI
 - `src/cli.rs`

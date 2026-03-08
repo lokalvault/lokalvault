@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub fn generate_salt() -> [u8; 32] {
@@ -40,6 +41,16 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Ve
     cipher
         .decrypt(Nonce::from_slice(nonce), ciphertext)
         .map_err(|_| "decryption failed — wrong password or tampered data".to_string())
+}
+
+pub fn generate_token() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+pub fn constant_time_compare(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 #[cfg(test)]
@@ -88,5 +99,19 @@ mod tests {
         let result = decrypt(&ciphertext, &key, &nonce);
         assert!(result.is_err());
         println!("✓ tampered data correctly rejected");
+    }
+
+    #[test]
+    fn test_generate_token_returns_64_char_hex() {
+        let token = generate_token();
+
+        assert_eq!(token.len(), 64);
+        assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_constant_time_compare() {
+        assert!(constant_time_compare("abc", "abc"));
+        assert!(!constant_time_compare("abc", "abd"));
     }
 }

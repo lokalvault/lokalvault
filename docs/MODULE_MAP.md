@@ -182,6 +182,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Verified with a Python child-process test
 - Verified by the real CLI demo command that prints `test-value-123`
 - Real run groundwork now includes terminal PIN approval, `.lokalvault` project config reading, token-aware daemon secret fetch, and env metadata injection helpers
+- Real run hardening now includes random token generation, constant-time token checks, and phase1 -> spawn -> phase2 ordering
 
 **Two-phase token registration (critical — do not simplify):**
 ```

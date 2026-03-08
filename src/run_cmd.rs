@@ -1,3 +1,4 @@
+use crate::crypto::generate_token;
 use crate::daemon::{
     DaemonState, POC_SOCKET_PATH, fetch_all_secrets as fetch_all_secrets_from_state,
     register_token_phase1, register_token_phase2,
@@ -36,7 +37,7 @@ pub async fn cmd_run(
         return Err("run approval denied".to_string());
     }
 
-    let token = format!("run-token-{}", std::process::id());
+    let token = generate_token();
     let uid = unsafe { libc::geteuid() };
     register_token_phase1(state, &token, uid, &project_name)?;
 
@@ -47,14 +48,16 @@ pub async fn cmd_run(
     }
 
     inject_secrets_into_env(&mut cmd, &secrets, &token, &project_name, POC_SOCKET_PATH);
-    let child = cmd.status().map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let child_pid = child.id();
 
-    register_token_phase2(state, &token, 0, Duration::from_secs(60))?;
-    Ok(child)
+    register_token_phase2(state, &token, child_pid, Duration::from_secs(60))?;
+    child.wait().map_err(|e| e.to_string())
 }
 
-pub fn show_pin_dialog(project: &str, command_preview: &str) -> Result<bool, String> {
-    let code = format!("{:02}", (project.len() + command_preview.len()) % 100);
+pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
+    let random = generate_token();
+    let code = &random[0..2];
     print!("Type [{code}] to allow access to '{project}': ");
     io::stdout().flush().map_err(|e| e.to_string())?;
 
