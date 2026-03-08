@@ -1,6 +1,8 @@
 use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
-use crate::run_cmd::get_project_from_config;
+use crate::run_cmd::{
+    ProjectConfig, get_project_from_config, read_project_config, write_project_config,
+};
 use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
 use crate::vault_ops::{
@@ -758,6 +760,166 @@ pub fn cmd_audit_stale(days: u64, never_accessed: bool) -> Result<String, String
     Ok(lines.join("\n"))
 }
 
+pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    let keys = if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "list_keys", "project": project }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        response["keys"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    } else if let Some(config) = read_project_config()? {
+        if config.project.name == project && !config.keys.required.is_empty() {
+            config.keys.required
+        } else {
+            let password = prompt_password("Master password: ")?;
+            let vault = unlock_vault(&password)?;
+            list_secret_keys(&vault, &project)?
+        }
+    } else {
+        let password = prompt_password("Master password: ")?;
+        let vault = unlock_vault(&password)?;
+        list_secret_keys(&vault, &project)?
+    };
+
+    let config = ProjectConfig {
+        project: crate::run_cmd::ProjectSection {
+            name: project.clone(),
+        },
+        keys: crate::run_cmd::KeysSection {
+            required: keys.clone(),
+            optional: vec![],
+        },
+    };
+    write_project_config(&config)?;
+
+    let agents = format!(
+        "# AI Agent Instructions\n\nThis project uses LokalVault for secrets management.\n\nSecrets are NOT in this repository. They cannot be accessed\nwithout the developer typing a confirmation code.\n\n## What You Must Know\n\n- Secret values are never in any file in this repository\n- They are injected at runtime via `lokalvault run`\n- Reference secrets by KEY NAME only: os.environ[\"OPENAI_KEY\"]\n\n## How To Run This Project\n\n  lokalvault run -- <detected run command>\n\n## What You Must Not Do\n\n- Do not read or write vault files (*.lv)\n- Do not connect to /tmp/lokalvault-*.sock\n- Do not hardcode secret values into source files\n- Do not create .env files containing real values\n- Do not replace os.environ[\"KEY\"] calls with literal values\n\n## Required Secrets For This Project\n\n{}\n",
+        keys.iter()
+            .map(|key| format!("  {key}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    fs::write("AGENTS.md", agents).map_err(|e| e.to_string())?;
+
+    ensure_ai_safe_gitignore()?;
+
+    if generate_example {
+        fs::write(
+            ".env.example",
+            keys.iter()
+                .map(|key| format!("{key}="))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(format!(
+        "✓ AGENTS.md generated\n✓ .lokalvault updated with required keys\n✓ .gitignore updated{}",
+        if generate_example {
+            "\n✓ .env.example generated"
+        } else {
+            ""
+        }
+    ))
+}
+
+pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
+    let share_password = prompt_password("Share password: ")?;
+    let secrets = if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        response["secrets"].as_object().cloned().unwrap_or_default()
+    } else {
+        let password = prompt_password("Master password: ")?;
+        let vault = unlock_vault(&password)?;
+        let project_entry = vault
+            .projects
+            .iter()
+            .find(|entry| entry.name == project)
+            .ok_or_else(|| format!("project not found: {project}"))?;
+        project_entry
+            .secrets
+            .iter()
+            .map(|secret| {
+                (
+                    secret.key.clone(),
+                    serde_json::Value::String(secret.value.clone()),
+                )
+            })
+            .collect()
+    };
+
+    let payload = serde_json::json!({
+        "project": project,
+        "shared_at": chrono::Utc::now().to_rfc3339(),
+        "secrets": secrets
+            .into_iter()
+            .map(|(key, value)| json!({ "key": key, "value": value.as_str().unwrap_or("") }))
+            .collect::<Vec<_>>()
+    });
+    let output_path = output
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{project}.lve"));
+    write_lve_file(Path::new(&output_path), &share_password, &payload)?;
+    Ok(format!("✓ Created {output_path}"))
+}
+
+pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
+    let share_password = prompt_password("Share password: ")?;
+    let payload = read_lve_file(path, &share_password)?;
+    let project_name = project
+        .map(ToString::to_string)
+        .or_else(|| {
+            payload
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        })
+        .ok_or_else(|| "missing project in share payload".to_string())?;
+
+    let password = prompt_password("Master password: ")?;
+    let mut vault = unlock_vault(&password)?;
+    if !vault
+        .projects
+        .iter()
+        .any(|entry| entry.name == project_name)
+    {
+        add_project(&mut vault, &project_name)?;
+    }
+
+    let secrets = payload
+        .get("secrets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "missing secrets in share payload".to_string())?;
+    let mut imported = 0usize;
+    for secret in secrets {
+        let key = secret
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing key in share payload".to_string())?;
+        let value = secret
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing value in share payload".to_string())?;
+        if add_secret(&mut vault, &project_name, key, value).is_ok() {
+            imported += 1;
+        }
+    }
+
+    crate::vault_file::write_vault(&vault, &password)?;
+    Ok(format!("✓ Imported {imported} secrets into {project_name}"))
+}
+
 fn resolve_project(project: Option<&str>) -> Result<String, String> {
     match project {
         Some(project) => Ok(project.to_string()),
@@ -884,6 +1046,57 @@ fn ensure_gitignore_contains(retired_path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn ensure_ai_safe_gitignore() -> Result<(), String> {
+    let ignore_path = Path::new(".gitignore");
+    let required = [".env", "*.env", "*.lv", ".env.*", "!.env.example"];
+    let mut contents = if ignore_path.exists() {
+        fs::read_to_string(ignore_path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
+
+    for entry in required {
+        if !contents.lines().any(|line| line.trim() == entry) {
+            if !contents.is_empty() && !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            contents.push_str(entry);
+            contents.push('\n');
+        }
+    }
+
+    fs::write(ignore_path, contents).map_err(|e| e.to_string())
+}
+
+fn write_lve_file(path: &Path, password: &str, payload: &serde_json::Value) -> Result<(), String> {
+    let salt = crate::crypto::generate_salt();
+    let nonce = crate::crypto::generate_nonce();
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let plaintext = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
+    let ciphertext = crate::crypto::encrypt(&plaintext, &key, &nonce);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"LVSE");
+    bytes.push(0x01);
+    bytes.extend_from_slice(&salt);
+    bytes.extend_from_slice(&nonce);
+    bytes.extend_from_slice(&ciphertext);
+    fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+fn read_lve_file(path: &Path, password: &str) -> Result<serde_json::Value, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() < 49 || &bytes[0..4] != b"LVSE" || bytes[4] != 0x01 {
+        return Err("invalid .lve file".to_string());
+    }
+    let salt: [u8; 32] = bytes[5..37].try_into().unwrap();
+    let nonce: [u8; 12] = bytes[37..49].try_into().unwrap();
+    let ciphertext = &bytes[49..];
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let plaintext = crate::crypto::decrypt(ciphertext, &key, &nonce)?;
+    serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
 }
 
 fn platform_command(target: PushTarget, key: &str, value: &str, environment: &str) -> Command {

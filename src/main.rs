@@ -87,6 +87,22 @@ enum Commands {
     AuditClear,
     Doctor,
     Dev,
+    AiSafe {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        generate_example: bool,
+    },
+    Share {
+        project: String,
+        #[arg(long)]
+        output: Option<String>,
+    },
+    Claim {
+        file: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
     Completion {
         shell: String,
     },
@@ -229,6 +245,22 @@ async fn main() {
             }
         }),
         Commands::Dev => cli::cmd_dev().map(|_| {}),
+        Commands::AiSafe {
+            project,
+            generate_example,
+        } => cli::cmd_ai_safe(project.as_deref(), generate_example).map(|message| {
+            eprintln!("{message}");
+        }),
+        Commands::Share { project, output } => {
+            cli::cmd_share(&project, output.as_deref()).map(|message| {
+                eprintln!("{message}");
+            })
+        }
+        Commands::Claim { file, project } => {
+            cli::cmd_claim(std::path::Path::new(&file), project.as_deref()).map(|message| {
+                eprintln!("{message}");
+            })
+        }
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             match shell.as_str() {

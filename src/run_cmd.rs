@@ -6,6 +6,7 @@ use crate::daemon::{
 use crate::ipc_client::send_ipc_request;
 use crate::settings::read_settings;
 use crate::vault_file::get_vault_path;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
@@ -14,6 +15,24 @@ use std::process::Command;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectSection {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeysSection {
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+    pub project: ProjectSection,
+    #[serde(default)]
+    pub keys: KeysSection,
+}
 
 pub async fn cmd_run_poc(command: Vec<String>) -> Result<std::process::ExitStatus, String> {
     cmd_run_poc_with_socket(command, POC_SOCKET_PATH).await
@@ -132,6 +151,22 @@ pub async fn cmd_run_entry(
     cmd_run_unified(None, resolved_project.as_deref(), command).await
 }
 
+pub fn read_project_config() -> Result<Option<ProjectConfig>, String> {
+    let path = PathBuf::from(".lokalvault");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let config: ProjectConfig = toml::from_str(&contents).map_err(|e| e.to_string())?;
+    Ok(Some(config))
+}
+
+pub fn write_project_config(config: &ProjectConfig) -> Result<(), String> {
+    let contents = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(".lokalvault", contents).map_err(|e| e.to_string())
+}
+
 async fn run_with_real_daemon(
     project: &str,
     command: Vec<String>,
@@ -164,6 +199,24 @@ async fn run_with_real_daemon(
         .iter()
         .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
         .collect::<HashMap<_, _>>();
+
+    if let Some(config) = read_project_config()?
+        && config.project.name == project
+    {
+        let missing = config
+            .keys
+            .required
+            .iter()
+            .filter(|key| !secrets.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "Missing required secrets for project {project}: {}",
+                missing.join(", ")
+            ));
+        }
+    }
 
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
@@ -202,17 +255,10 @@ pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, St
 }
 
 pub fn get_project_from_config() -> Result<Option<String>, String> {
-    let path = PathBuf::from(".lokalvault");
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("name = ") {
-            return Ok(Some(name.trim_matches('"').to_string()));
-        }
+    if let Some(config) = read_project_config()?
+        && !config.project.name.is_empty()
+    {
+        return Ok(Some(config.project.name));
     }
 
     Ok(read_settings().default_project)

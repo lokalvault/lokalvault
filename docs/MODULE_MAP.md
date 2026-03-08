@@ -230,6 +230,10 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 - Uses IPC-first daemon access through `src/ipc_client.rs` when a real daemon is running, with offline vault fallback when it is not
 - Includes tests for config resolution, POC compatibility, IPC lifecycle behavior, and command parsing/output contracts
 - Group 2 pre-Phase-1C additions live here too: `cmd_doctor`, `cmd_dev`, dotenv warnings, and audit stale-report helpers
+- Group 3 pre-Phase-1C additions live here too: `cmd_ai_safe`, `cmd_share`, and `cmd_claim`
+
+`.lokalvault` is now TOML-backed and may include `[project]` and `[keys]`
+sections. Required keys enforcement for `run` depends on that manifest.
 
 ---
 

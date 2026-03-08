@@ -265,3 +265,24 @@ fn test_dev_fallback_error_no_detection() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Could not detect run command"));
 }
+
+#[test]
+fn test_ai_safe_generates_env_example() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-ai-safe-test");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(
+        tmp.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = []\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["ai-safe", "--project", "my-app", "--generate-example"])
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(tmp.join(".env.example").exists());
+}
