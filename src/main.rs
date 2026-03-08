@@ -35,12 +35,16 @@ enum Commands {
     Lock,
     Init {
         project_name: Option<String>,
+        #[arg(long)]
+        template: Option<String>,
     },
     Add {
         #[arg(long)]
         project: Option<String>,
         key: String,
         value: Option<String>,
+        #[arg(long)]
+        clipboard: bool,
     },
     Update {
         #[arg(long)]
@@ -72,6 +76,19 @@ enum Commands {
         project: Option<String>,
         #[arg(long)]
         format: String,
+    },
+    Diff {
+        path: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    Copy {
+        project: Option<String>,
+        key: String,
+    },
+    Shell {
+        #[arg(long)]
+        project: Option<String>,
     },
     Status {},
     Audit {
@@ -162,14 +179,30 @@ async fn main() {
         Commands::Lock => cli::cmd_lock().map(|message| {
             eprintln!("{message}");
         }),
-        Commands::Init { project_name } => cli::cmd_init(project_name.as_deref()).map(|message| {
-            eprintln!("{message}");
-        }),
+        Commands::Init {
+            project_name,
+            template,
+        } => {
+            let template = match template.as_deref() {
+                Some(value) => match cli::ProjectTemplate::parse(value) {
+                    Ok(template) => Some(template),
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
+                },
+                None => None,
+            };
+            cli::cmd_init(project_name.as_deref(), template).map(|message| {
+                eprintln!("{message}");
+            })
+        }
         Commands::Add {
             project,
             key,
             value,
-        } => cli::cmd_add(project.as_deref(), &key, value.as_deref()).map(|message| {
+            clipboard,
+        } => cli::cmd_add(project.as_deref(), &key, value.as_deref(), clipboard).map(|message| {
             eprintln!("{message}");
         }),
         Commands::Update {
@@ -212,6 +245,19 @@ async fn main() {
                 print!("{output}");
             })
         }
+        Commands::Diff { path, project } => {
+            cli::cmd_diff(std::path::Path::new(&path), project.as_deref()).map(|output| {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            })
+        }
+        Commands::Copy { project, key } => cli::cmd_copy(project.as_deref(), &key).map(|message| {
+            eprintln!("{message}");
+        }),
+        Commands::Shell { project } => cli::cmd_shell(project.as_deref()).map(|message| {
+            eprintln!("{message}");
+        }),
         Commands::Status {} => cli::cmd_status().map(|status| {
             println!("{status}");
         }),

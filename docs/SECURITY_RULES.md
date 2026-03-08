@@ -174,6 +174,23 @@ Forbidden output:
 
 ---
 
+
+## RULE 11B — Clipboard flows must never print secret values
+
+Commands like `copy` and `add --clipboard` may move secret values through the
+system clipboard, but they must never print those values to stdout/stderr or
+persist them in logs. Clipboard clearing is best-effort and must never crash
+the app if the platform clipboard is unavailable.
+
+---
+
+## RULE 11C — Dotenv diff output must stay redacted
+
+`lokalvault diff .env` may compare file values with vault values, but it must
+report only status markers like identical/present/different. It must never print
+the actual secret values from either side.
+
+---
 ## RULE 12 — PIN dialog sends only a boolean to Rust
 
 The frontend generates a 2-digit code, shows it to the user,

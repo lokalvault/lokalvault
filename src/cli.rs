@@ -2,7 +2,8 @@ use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
 use crate::daemon::find_matching_secret_keys;
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::{
-    ProjectConfig, get_project_from_config, read_project_config, write_project_config,
+    ProjectConfig, get_project_from_config, inject_secrets_into_env, read_project_config,
+    shell_program, write_project_config,
 };
 use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
@@ -12,6 +13,7 @@ use crate::vault_ops::{
 };
 use rpassword::read_password;
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -100,6 +102,43 @@ pub fn cmd_unlock() -> Result<String, String> {
     Ok("✓ Vault unlocked. Session active.".to_string())
 }
 
+#[derive(Clone, Copy)]
+pub enum ProjectTemplate {
+    OpenAi,
+    Supabase,
+    Stripe,
+}
+
+impl ProjectTemplate {
+    pub fn parse(input: &str) -> Result<Self, String> {
+        match input {
+            "openai" => Ok(Self::OpenAi),
+            "supabase" => Ok(Self::Supabase),
+            "stripe" => Ok(Self::Stripe),
+            _ => Err(format!("unsupported template: {input}")),
+        }
+    }
+
+    pub fn required_keys(self) -> Vec<String> {
+        match self {
+            Self::OpenAi => vec!["OPENAI_API_KEY", "OPENAI_ORG_ID"],
+            Self::Supabase => vec![
+                "SUPABASE_URL",
+                "SUPABASE_ANON_KEY",
+                "SUPABASE_SERVICE_ROLE_KEY",
+            ],
+            Self::Stripe => vec![
+                "STRIPE_SECRET_KEY",
+                "STRIPE_PUBLISHABLE_KEY",
+                "STRIPE_WEBHOOK_SECRET",
+            ],
+        }
+        .into_iter()
+        .map(ToString::to_string)
+        .collect()
+    }
+}
+
 pub fn cmd_lock() -> Result<String, String> {
     if !is_daemon_running() {
         return Ok("Vault already locked.".to_string());
@@ -120,7 +159,10 @@ pub fn cmd_lock() -> Result<String, String> {
     Err(response_error(&response))
 }
 
-pub fn cmd_init(project_name: Option<&str>) -> Result<String, String> {
+pub fn cmd_init(
+    project_name: Option<&str>,
+    template: Option<ProjectTemplate>,
+) -> Result<String, String> {
     let name = match project_name {
         Some(name) => name.to_string(),
         None => env::current_dir()
@@ -132,16 +174,40 @@ pub fn cmd_init(project_name: Option<&str>) -> Result<String, String> {
             .unwrap_or_else(|| "lokalvault-project".to_string()),
     };
 
-    let contents = format!("[project]\nname = \"{name}\"\n");
-    fs::write(".lokalvault", contents).map_err(|e| e.to_string())?;
+    let mut config = ProjectConfig::default();
+    config.project.name = name;
+    if let Some(template) = template {
+        config.keys.required = template.required_keys();
+        config.keys.optional = Vec::new();
+    }
+
+    write_project_config(&config)?;
     Ok("Created .lokalvault".to_string())
 }
 
-pub fn cmd_add(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
+pub fn cmd_add(
+    project: Option<&str>,
+    key: &str,
+    value: Option<&str>,
+    from_clipboard: bool,
+) -> Result<String, String> {
     let project = resolve_project(project)?;
-    let secret_value = match value {
-        Some(value) => value.to_string(),
-        None => prompt_password("Secret value: ")?,
+    if from_clipboard && value.is_some() {
+        return Err("cannot use a literal value and --clipboard together".to_string());
+    }
+    let secret_value = match (value, from_clipboard) {
+        (Some(value), false) => {
+            eprintln!("⚠ This value may now be stored in your shell history.");
+            eprintln!("  Prefer: lokalvault add --project {} {}", project, key);
+            value.to_string()
+        }
+        (None, true) => {
+            let value = read_from_clipboard()?;
+            schedule_clipboard_clear(value.clone())?;
+            value
+        }
+        (None, false) => prompt_password("Secret value: ")?,
+        (Some(_), true) => unreachable!(),
     };
 
     if is_daemon_running() {
@@ -167,6 +233,13 @@ pub fn cmd_add(project: Option<&str>, key: &str, value: Option<&str>) -> Result<
     add_secret(&mut vault, &project, key, &secret_value)?;
     crate::vault_file::write_vault(&vault, &password)?;
     Ok(format!("✓ Added {key} to {project}"))
+}
+
+pub fn cmd_copy(project: Option<&str>, key: &str) -> Result<String, String> {
+    let value = cmd_get(project, key)?;
+    write_to_clipboard(&value)?;
+    schedule_clipboard_clear(value)?;
+    Ok(format!("✓ {key} copied to clipboard"))
 }
 
 pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
@@ -449,31 +522,100 @@ pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String,
     }
 }
 
+pub fn cmd_diff(path: &Path, project: Option<&str>) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    let dotenv = parse_dotenv_file(path)?;
+    let vault = get_project_secret_map(&project)?;
+    let mut keys = BTreeSet::new();
+    keys.extend(dotenv.keys().cloned());
+    keys.extend(vault.keys().cloned());
+
+    Ok(keys
+        .into_iter()
+        .map(|key| match (dotenv.get(&key), vault.get(&key)) {
+            (Some(file_value), Some(vault_value)) if file_value == vault_value => {
+                format!("✓ {key}")
+            }
+            (Some(_), Some(_)) => format!("~ {key}=<value differs>"),
+            (Some(_), None) => format!("+ {key}=<value present>"),
+            (None, Some(_)) => format!("- {key}"),
+            (None, None) => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 pub fn cmd_status() -> Result<String, String> {
-    let _ = check_for_dotenv_in_cwd("lokalvault-project");
+    let mut lines = vec![
+        "LokalVault Status".to_string(),
+        "------------------------------".to_string(),
+    ];
+    let dotenv_warning = Path::new(".env").exists();
     if is_daemon_running() {
         let response = send_ipc_request(json!({ "type": "project_count" }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-            return Ok(format!(
-                "Vault: unlocked\nProjects: {}\nVersion: {}",
-                response["count"].as_u64().unwrap_or(0),
-                env!("CARGO_PKG_VERSION")
+            lines.push("Vault:    unlocked".to_string());
+            lines.push(format!(
+                "Projects: {}",
+                response["count"].as_u64().unwrap_or(0)
             ));
+            lines.push(format!("Version:  {}", env!("CARGO_PKG_VERSION")));
+            let recent = read_audit_log(None)?;
+            if !recent.is_empty() {
+                lines.push(String::new());
+                lines.push("Recent Access:".to_string());
+                for event in recent.into_iter().take(3) {
+                    lines.push(format!(
+                        "  {}  {}  {}  {}",
+                        event.timestamp, event.process_name, event.project, event.key
+                    ));
+                }
+            }
+            if dotenv_warning {
+                lines.push(String::new());
+                lines.push("Warnings:".to_string());
+                lines.push("  .env file detected in current directory".to_string());
+            }
+            return Ok(lines.join("\n"));
         }
         return Err(response_error(&response));
     }
 
     if get_vault_path().exists() {
-        return Ok(format!(
-            "Vault locked - run lokalvault unlock to see details\nVersion: {}",
-            env!("CARGO_PKG_VERSION")
-        ));
+        lines.push("Vault:    locked".to_string());
+        lines.push("Daemon:   stopped".to_string());
+        lines.push(format!("Version:  {}", env!("CARGO_PKG_VERSION")));
+        if dotenv_warning {
+            lines.push(String::new());
+            lines.push("Warnings:".to_string());
+            lines.push("  .env file detected in current directory".to_string());
+        }
+        return Ok(lines.join("\n"));
     }
 
-    Ok(format!(
-        "No vault found - run lokalvault create\nVersion: {}",
-        env!("CARGO_PKG_VERSION")
-    ))
+    lines.push("Vault:    missing".to_string());
+    lines.push("Daemon:   stopped".to_string());
+    lines.push(format!("Version:  {}", env!("CARGO_PKG_VERSION")));
+    Ok(lines.join("\n"))
+}
+
+pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
+    let project = resolve_project(project)?;
+    let secrets = get_project_secret_map(&project)?;
+    let shell = shell_program();
+    let mut cmd = Command::new(&shell);
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        "shell-session",
+        &project,
+        &get_socket_path().display().to_string(),
+    );
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("shell exited with status {status}"));
+    }
+    Ok(format!("✓ Exited shell for {project}"))
 }
 
 pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, String> {
@@ -1008,6 +1150,76 @@ fn resolve_project(project: Option<&str>) -> Result<String, String> {
             "no project specified - run lokalvault init or pass --project".to_string()
         }),
     }
+}
+
+fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, String> {
+    if is_daemon_running() {
+        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+        return Ok(response["secrets"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, value)| (key, value.as_str().unwrap_or("").to_string()))
+            .collect());
+    }
+
+    let password = prompt_password("Master password: ")?;
+    let vault = unlock_vault(&password)?;
+    let project_entry = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .ok_or_else(|| format!("project not found: {project}"))?;
+    Ok(project_entry
+        .secrets
+        .iter()
+        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .collect())
+}
+
+fn parse_dotenv_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut map = BTreeMap::new();
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    Ok(map)
+}
+
+fn read_from_clipboard() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.get_text().map_err(|e| e.to_string())
+}
+
+fn write_to_clipboard(value: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_text(value.to_string())
+        .map_err(|e| e.to_string())
+}
+
+fn schedule_clipboard_clear(expected: String) -> Result<(), String> {
+    let seconds = read_settings().clipboard_clear_seconds;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(seconds as u64));
+        if let Ok(mut clipboard) = arboard::Clipboard::new()
+            && let Ok(current) = clipboard.get_text()
+            && current == expected
+        {
+            let _ = clipboard.set_text(String::new());
+        }
+    });
+    Ok(())
 }
 
 fn git_hook_path() -> Result<std::path::PathBuf, String> {

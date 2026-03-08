@@ -279,6 +279,10 @@ pub fn inject_secrets_into_env(
     cmd.env("LV_SOCKET", socket_path);
 }
 
+pub fn shell_program() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
 pub fn fetch_all_secrets(
     state: &DaemonState,
     token: &str,

@@ -88,19 +88,15 @@ just to push to Vercel. That collapses the entire security model.
 
 ---
 
-### ADDED: Repo protection commands before UI
-**Why:** AI-safe mode reduces accidental exposure inside the repo, but it
-does not stop a staged commit from containing a real secret value. Group 4
-adds `lokalvault scan-diff` and `lokalvault protect-repo` so the CLI can
-block commits when staged patch text contains stored secret values.
+### ADDED: CLI-first completion before UI
+**Why:** The product now treats the CLI as the complete source of truth for Part 1.
+Developer-feel workflows such as repo protection, shell access, dotenv diffing,
+clipboard-safe secret handling, and project templates land before any UI work.
 
-**How it works:**
-- `lokalvault scan-diff` reads staged diff text from stdin
-- It compares diff text against project secret values, not key names
-- Empty values and values shorter than 8 chars are ignored
-- It prints matching key names only and exits nonzero on detection
-- `lokalvault protect-repo` installs a LokalVault-managed pre-commit hook
-- Existing non-LokalVault hooks are not overwritten automatically
+**Roadmap shape:**
+- `Part 1` - CLI-first complete product
+- `Part 1B` - developer-feel CLI pass
+- `Part 2` - Tauri/React UI
 
 ---
 

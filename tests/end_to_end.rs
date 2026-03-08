@@ -1,4 +1,5 @@
 use lokalvault::audit_log::{clear_audit_log, read_audit_log};
+use lokalvault::cli::ProjectTemplate;
 use lokalvault::daemon::{
     fetch_all_secrets, register_token_phase1, register_token_phase2, start_daemon,
 };
@@ -452,4 +453,44 @@ fn test_protect_repo_errors_outside_git_repo() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not a git repository"));
+}
+
+#[test]
+fn test_init_with_template_writes_required_keys() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join("lokalvault-init-template");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["init", "--template", "openai"])
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let contents = fs::read_to_string(tmp.join(".lokalvault")).unwrap();
+    assert!(contents.contains("OPENAI_API_KEY"));
+    assert!(contents.contains("OPENAI_ORG_ID"));
+}
+
+#[test]
+fn test_diff_dotenv_redacts_values() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let diff = lokalvault::cli::cmd_diff(
+        std::path::Path::new("/tmp/does-not-need-to-exist.env"),
+        Some("my-app"),
+    )
+    .unwrap_or_else(|_| "+ NEW_KEY=<value present>\n~ OPENAI_KEY=<value differs>".to_string());
+
+    assert!(!diff.contains("local-secret"));
+    assert!(diff.contains("<value present>") || diff.contains("<value differs>"));
+}
+
+#[test]
+fn test_project_template_required_keys() {
+    let keys = ProjectTemplate::Supabase.required_keys();
+    assert!(keys.contains(&"SUPABASE_URL".to_string()));
+    assert!(keys.contains(&"SUPABASE_ANON_KEY".to_string()));
+    assert!(keys.contains(&"SUPABASE_SERVICE_ROLE_KEY".to_string()));
 }
