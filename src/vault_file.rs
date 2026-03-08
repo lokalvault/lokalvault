@@ -44,6 +44,12 @@ impl VaultData {
     }
 }
 
+impl Default for VaultData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Vault path ──────────────────────────────────────────────────
 
 pub fn get_vault_path() -> PathBuf {

@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, write_vault};
 use std::fs;
 use std::path::Path;
@@ -16,7 +17,7 @@ pub struct ImportResult {
 
 pub fn create_vault(password: &str) -> Result<(), String> {
     if get_vault_path().exists() {
-        return Err("vault already exists".to_string());
+        return Err(AppError::ValidationError("vault already exists".to_string()).to_string());
     }
 
     write_vault(&VaultData::new(), password)
@@ -53,7 +54,7 @@ pub fn add_project(vault: &mut VaultData, name: &str) -> Result<(), String> {
     validate_project_name(name)?;
 
     if vault.projects.iter().any(|project| project.name == name) {
-        return Err("project already exists".to_string());
+        return Err(AppError::ProjectAlreadyExists(name.to_string()).to_string());
     }
 
     vault.projects.push(Project {
@@ -69,7 +70,7 @@ pub fn delete_project(vault: &mut VaultData, name: &str) -> Result<(), String> {
         .projects
         .iter()
         .position(|project| project.name == name)
-        .ok_or_else(|| format!("project not found: {name}"))?;
+        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()).to_string())?;
 
     vault.projects.remove(index);
     Ok(())
@@ -85,7 +86,7 @@ pub fn add_secret(
 
     let project = find_project_mut(vault, project)?;
     if project.secrets.iter().any(|secret| secret.key == key) {
-        return Err("secret already exists".to_string());
+        return Err(AppError::SecretAlreadyExists(key.to_string()).to_string());
     }
 
     project.secrets.push(Secret {
@@ -109,7 +110,7 @@ pub fn update_secret(
         .secrets
         .iter_mut()
         .find(|secret| secret.key == key)
-        .ok_or_else(|| format!("secret not found: {key}"))?;
+        .ok_or_else(|| AppError::SecretNotFound(key.to_string()).to_string())?;
 
     secret.value = value.to_string();
     Ok(())
@@ -121,7 +122,7 @@ pub fn delete_secret(vault: &mut VaultData, project: &str, key: &str) -> Result<
         .secrets
         .iter()
         .position(|secret| secret.key == key)
-        .ok_or_else(|| format!("secret not found: {key}"))?;
+        .ok_or_else(|| AppError::SecretNotFound(key.to_string()).to_string())?;
 
     project.secrets.remove(index);
     Ok(())
@@ -143,7 +144,7 @@ pub fn list_secret_keys(vault: &VaultData, project: &str) -> Result<Vec<String>,
         .projects
         .iter()
         .find(|item| item.name == project)
-        .ok_or_else(|| format!("project not found: {project}"))?;
+        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()).to_string())?;
 
     Ok(project
         .secrets
@@ -199,19 +200,25 @@ fn find_project_mut<'a>(vault: &'a mut VaultData, name: &str) -> Result<&'a mut 
         .projects
         .iter_mut()
         .find(|project| project.name == name)
-        .ok_or_else(|| format!("project not found: {name}"))
+        .ok_or_else(|| AppError::ProjectNotFound(name.to_string()).to_string())
 }
 
 fn validate_project_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
-        return Err("project name must be 1-64 characters".to_string());
+        return Err(AppError::InvalidProjectName(
+            "project name must be 1-64 characters".to_string(),
+        )
+        .to_string());
     }
 
     if !name
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
     {
-        return Err("project names may contain only letters, numbers, and hyphens".to_string());
+        return Err(AppError::InvalidProjectName(
+            "project names may contain only letters, numbers, and hyphens".to_string(),
+        )
+        .to_string());
     }
 
     Ok(())
@@ -219,14 +226,19 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 
 fn validate_secret_key(key: &str) -> Result<(), String> {
     if key.is_empty() {
-        return Err("secret key cannot be empty".to_string());
+        return Err(
+            AppError::InvalidSecretKey("secret key cannot be empty".to_string()).to_string(),
+        );
     }
 
     if !key
         .chars()
         .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
     {
-        return Err("secret keys must be SCREAMING_SNAKE_CASE".to_string());
+        return Err(AppError::InvalidSecretKey(
+            "secret keys must be SCREAMING_SNAKE_CASE".to_string(),
+        )
+        .to_string());
     }
 
     Ok(())
@@ -322,7 +334,7 @@ mod tests {
         add_project(&mut vault, "my-app").unwrap();
 
         let error = add_project(&mut vault, "my-app").unwrap_err();
-        assert_eq!(error, "project already exists");
+        assert_eq!(error, "project already exists: my-app");
     }
 
     #[test]
@@ -367,7 +379,7 @@ mod tests {
         let mut vault = sample_vault();
         let error = add_secret(&mut vault, "my-app", "OPENAI_KEY", "other").unwrap_err();
 
-        assert_eq!(error, "secret already exists");
+        assert_eq!(error, "secret already exists: OPENAI_KEY");
     }
 
     #[test]
@@ -469,12 +481,12 @@ mod tests {
 
             change_master_password(&vault, "old-password", "new-password").unwrap();
 
-            if unlock_vault("old-password").is_err() {
-                if let Ok(reloaded) = unlock_vault("new-password") {
-                    assert_eq!(reloaded.projects[0].secrets[0].value, "test-value-123");
-                    cleanup();
-                    return;
-                }
+            if unlock_vault("old-password").is_err()
+                && let Ok(reloaded) = unlock_vault("new-password")
+            {
+                assert_eq!(reloaded.projects[0].secrets[0].value, "test-value-123");
+                cleanup();
+                return;
             }
 
             cleanup();

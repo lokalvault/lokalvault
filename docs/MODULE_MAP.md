@@ -248,6 +248,14 @@ pub enum AppError {
 }
 ```
 
+**Current implementation status:**
+- Initial shared `AppError` layer implemented
+- Used by `src/vault_ops.rs` for duplicate and validation/domain errors
+- Ready to expand as the real daemon and run flow are implemented
+
+**Current next step:**
+- Replace the POC daemon with the real vault-backed daemon next
+
 ---
 
 ## src/main.rs — Entry Point
