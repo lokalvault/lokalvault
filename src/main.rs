@@ -81,6 +81,14 @@ enum Commands {
         process_name: Option<String>,
     },
     AuditClear,
+    ConfigGet {
+        key: String,
+    },
+    ConfigSet {
+        key: String,
+        value: String,
+    },
+    ConfigList,
     Push {
         project: String,
         #[arg(long)]
@@ -201,6 +209,17 @@ async fn main() {
         }
         Commands::AuditClear => cli::cmd_audit_clear().map(|message| {
             eprintln!("{message}");
+        }),
+        Commands::ConfigGet { key } => cli::cmd_config_get(&key).map(|value| {
+            println!("{value}");
+        }),
+        Commands::ConfigSet { key, value } => cli::cmd_config_set(&key, &value).map(|message| {
+            eprintln!("{message}");
+        }),
+        Commands::ConfigList => cli::cmd_config_list().map(|output| {
+            if !output.is_empty() {
+                println!("{output}");
+            }
         }),
         Commands::Push {
             project,

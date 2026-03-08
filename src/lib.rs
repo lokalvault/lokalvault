@@ -5,5 +5,6 @@ pub mod daemon;
 pub mod errors;
 pub mod ipc_client;
 pub mod run_cmd;
+pub mod settings;
 pub mod vault_file;
 pub mod vault_ops;

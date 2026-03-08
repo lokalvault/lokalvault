@@ -1,6 +1,7 @@
 use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::get_project_from_config;
+use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
 use crate::vault_ops::{
     add_project, add_secret, create_vault, delete_project, delete_secret, import_dotenv,
@@ -500,6 +501,67 @@ pub fn cmd_audit_clear() -> Result<String, String> {
     Ok("✓ Cleared audit log.".to_string())
 }
 
+pub fn cmd_config_get(key: &str) -> Result<String, String> {
+    let settings = read_settings();
+    get_setting_value(&settings, key)
+}
+
+pub fn cmd_config_set(key: &str, value: &str) -> Result<String, String> {
+    let mut settings = read_settings();
+    match key {
+        "session-timeout-minutes" => {
+            let value = parse_u32_range(value, 5, 1440, key)?;
+            settings.session_timeout_minutes = value;
+        }
+        "lock-on-sleep" => {
+            settings.lock_on_sleep = parse_bool(value, key)?;
+        }
+        "clipboard-clear-seconds" => {
+            let value = parse_u32_range(value, 5, 300, key)?;
+            settings.clipboard_clear_seconds = value;
+        }
+        "show-tray-icon" => {
+            settings.show_tray_icon = parse_bool(value, key)?;
+        }
+        "default-project" => {
+            settings.default_project = if value == "none" {
+                None
+            } else {
+                Some(value.to_string())
+            };
+        }
+        _ => return Err(format!("unsupported config key: {key}")),
+    }
+    write_settings(&settings)?;
+    Ok(format!("Set {key}={}", get_setting_value(&settings, key)?))
+}
+
+pub fn cmd_config_list() -> Result<String, String> {
+    let settings = read_settings();
+    Ok([
+        format!(
+            "session-timeout-minutes={}",
+            settings.session_timeout_minutes
+        ),
+        format!("lock-on-sleep={}", settings.lock_on_sleep),
+        format!(
+            "clipboard-clear-seconds={}",
+            settings.clipboard_clear_seconds
+        ),
+        format!("show-tray-icon={}", settings.show_tray_icon),
+        format!("argon2-memory-kb={}", settings.argon2_memory_kb),
+        format!("argon2-iterations={}", settings.argon2_iterations),
+        format!("argon2-parallelism={}", settings.argon2_parallelism),
+        format!(
+            "default-project={}",
+            settings
+                .default_project
+                .unwrap_or_else(|| "none".to_string())
+        ),
+    ]
+    .join("\n"))
+}
+
 pub fn cmd_push(
     project: &str,
     target: PushTarget,
@@ -573,6 +635,41 @@ fn response_error(response: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown daemon error")
         .to_string()
+}
+
+fn get_setting_value(settings: &Settings, key: &str) -> Result<String, String> {
+    match key {
+        "session-timeout-minutes" => Ok(settings.session_timeout_minutes.to_string()),
+        "lock-on-sleep" => Ok(settings.lock_on_sleep.to_string()),
+        "clipboard-clear-seconds" => Ok(settings.clipboard_clear_seconds.to_string()),
+        "show-tray-icon" => Ok(settings.show_tray_icon.to_string()),
+        "argon2-memory-kb" => Ok(settings.argon2_memory_kb.to_string()),
+        "argon2-iterations" => Ok(settings.argon2_iterations.to_string()),
+        "argon2-parallelism" => Ok(settings.argon2_parallelism.to_string()),
+        "default-project" => Ok(settings
+            .default_project
+            .clone()
+            .unwrap_or_else(|| "none".to_string())),
+        _ => Err(format!("unsupported config key: {key}")),
+    }
+}
+
+fn parse_u32_range(value: &str, min: u32, max: u32, key: &str) -> Result<u32, String> {
+    let parsed: u32 = value
+        .parse()
+        .map_err(|_| format!("invalid value for {key}"))?;
+    if parsed < min || parsed > max {
+        return Err(format!("{key} must be between {min} and {max}"));
+    }
+    Ok(parsed)
+}
+
+fn parse_bool(value: &str, key: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("invalid value for {key}")),
+    }
 }
 
 fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String> {

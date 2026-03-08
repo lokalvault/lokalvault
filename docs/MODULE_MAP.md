@@ -248,6 +248,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 
 | Function | Description |
 |---|---|
+| `get_settings_path` | Returns settings file path |
 | `read_settings` | Returns defaults if file missing. Never fails. |
 | `write_settings` | Serialize and write. |
 
