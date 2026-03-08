@@ -185,6 +185,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Verified by the real CLI demo command that prints `test-value-123`
 - Real run groundwork now includes terminal PIN approval, `.lokalvault` project config reading, token-aware daemon secret fetch, and env metadata injection helpers
 - Real run hardening now includes random token generation, constant-time token checks, and phase1 -> spawn -> phase2 ordering
+- Part 1B follow-up additions live here too: signal passthrough for `run`, watch-mode child restarts, and shared child wait helpers
 
 **Two-phase token registration (critical — do not simplify):**
 ```

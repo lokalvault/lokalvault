@@ -23,6 +23,7 @@ chrono     = { version = "0.4", features = ["serde"] }
 clap_complete = "4"
 toml = "0.8"
 arboard = "3"
+notify = "6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

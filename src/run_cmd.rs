@@ -11,10 +11,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectSection {
@@ -116,7 +118,12 @@ pub async fn cmd_run_unified(
 pub async fn cmd_run_entry(
     project: Option<&str>,
     command: Vec<String>,
+    watch_mode: bool,
 ) -> Result<std::process::ExitStatus, String> {
+    if watch_mode {
+        return cmd_run_watch(project, command).await;
+    }
+
     let resolved_project = match project {
         Some(project) => Some(project.to_string()),
         None => get_project_from_config()?,
@@ -149,6 +156,27 @@ pub async fn cmd_run_entry(
     }
 
     cmd_run_unified(None, resolved_project.as_deref(), command).await
+}
+
+async fn cmd_run_watch(
+    project: Option<&str>,
+    command: Vec<String>,
+) -> Result<std::process::ExitStatus, String> {
+    if command.is_empty() {
+        return Err("command cannot be empty".to_string());
+    }
+
+    let (tx, mut rx) = watch::channel(false);
+    let watcher = start_watch_thread(tx)?;
+    loop {
+        let mut child = spawn_run_child(project, &command).await?;
+        let status = wait_with_signal_passthrough(&mut child, Some(&mut rx)).await?;
+        if !*rx.borrow() {
+            drop(watcher);
+            return Ok(status);
+        }
+        rx.borrow_and_update();
+    }
 }
 
 pub fn read_project_config() -> Result<Option<ProjectConfig>, String> {
@@ -238,7 +266,7 @@ async fn run_with_real_daemon(
             .to_string());
     }
 
-    child.wait().map_err(|e| e.to_string())
+    wait_with_signal_passthrough(&mut child, None).await
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
@@ -308,7 +336,175 @@ async fn cmd_run_poc_with_socket(
     }
 
     cmd.env("OPENAI_KEY", secret_value);
-    cmd.status().map_err(|e| e.to_string())
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    wait_with_signal_passthrough(&mut child, None).await
+}
+
+async fn spawn_run_child(project: Option<&str>, command: &[String]) -> Result<Child, String> {
+    let resolved_project = match project {
+        Some(project) => Some(project.to_string()),
+        None => get_project_from_config()?,
+    };
+
+    if crate::ipc_client::is_daemon_running() && resolved_project.is_some() {
+        return spawn_with_real_daemon(resolved_project.as_deref().unwrap(), command.to_vec())
+            .await;
+    }
+
+    spawn_poc_child(command.to_vec()).await
+}
+
+async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<Child, String> {
+    let token = generate_token();
+    let phase1 = send_ipc_request(serde_json::json!({
+        "type": "register_token_phase1",
+        "token": token,
+        "project": project,
+    }))?;
+    if phase1.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(phase1["error"]
+            .as_str()
+            .unwrap_or("token registration failed")
+            .to_string());
+    }
+
+    let secrets_response = send_ipc_request(serde_json::json!({
+        "type": "get_all_secrets_for_run",
+        "token": token,
+        "pid": 0,
+    }))?;
+    let secrets = secrets_response["secrets"]
+        .as_object()
+        .ok_or_else(|| "daemon response missing secrets".to_string())?
+        .iter()
+        .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
+        .collect::<HashMap<_, _>>();
+
+    let mut cmd = Command::new(&command[0]);
+    if command.len() > 1 {
+        cmd.args(&command[1..]);
+    }
+    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    let phase2 = send_ipc_request(serde_json::json!({
+        "type": "register_token_phase2",
+        "token": token,
+        "pid": child.id(),
+    }))?;
+    if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(phase2["error"]
+            .as_str()
+            .unwrap_or("token activation failed")
+            .to_string());
+    }
+
+    Ok(child)
+}
+
+async fn spawn_poc_child(command: Vec<String>) -> Result<Child, String> {
+    let secret_value = fetch_poc_secret(POC_SOCKET_PATH).await?;
+    let mut cmd = Command::new(&command[0]);
+    if command.len() > 1 {
+        cmd.args(&command[1..]);
+    }
+    cmd.env("OPENAI_KEY", secret_value);
+    cmd.spawn().map_err(|e| e.to_string())
+}
+
+async fn wait_with_signal_passthrough(
+    child: &mut Child,
+    mut watch_rx: Option<&mut watch::Receiver<bool>>,
+) -> Result<std::process::ExitStatus, String> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Ok(status);
+        }
+
+        if let Some(rx) = &mut watch_rx
+            && rx.has_changed().unwrap_or(false)
+        {
+            forward_terminate(child)?;
+            return child.wait().map_err(|e| e.to_string());
+        }
+
+        #[cfg(unix)]
+        {
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .map_err(|e| e.to_string())?;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = interrupt.recv() => {
+                    forward_interrupt(child)?;
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+        }
+
+        if let Some(rx) = &mut watch_rx
+            && rx.has_changed().unwrap_or(false)
+        {
+            let _ = rx.borrow_and_update();
+            forward_terminate(child)?;
+            return child.wait().map_err(|e| e.to_string());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn forward_interrupt(child: &Child) -> Result<(), String> {
+    let rc = unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
+}
+
+fn forward_terminate(child: &Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        if rc == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error().to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        Ok(())
+    }
+}
+
+fn start_watch_thread(tx: watch::Sender<bool>) -> Result<Arc<notify::RecommendedWatcher>, String> {
+    use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+    let mut watcher = RecommendedWatcher::new(
+        move |result: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = result {
+                match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                        let _ = tx.send(true);
+                    }
+                    _ => {}
+                }
+            }
+        },
+        Config::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    watcher
+        .watch(std::path::Path::new("."), RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    Ok(Arc::new(watcher))
 }
 
 async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
@@ -411,6 +607,12 @@ mod tests {
         assert!(stdout.contains("LV_RUN_TOKEN=token-1"));
         assert!(stdout.contains("LV_PROJECT=my-app"));
         assert!(stdout.contains("LV_SOCKET=/tmp/socket"));
+    }
+
+    #[test]
+    fn test_shell_program_prefers_env_shell() {
+        unsafe { std::env::set_var("SHELL", "/bin/zsh") };
+        assert_eq!(shell_program(), "/bin/zsh");
     }
 
     #[test]

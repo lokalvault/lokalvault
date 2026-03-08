@@ -18,21 +18,14 @@
 - `v0.1.9-pre-phase1c-complete`
 - `v0.1.10-docs-sync`
 
-## Current Milestone - Part 1B
+## Current Milestone - Part 1B Follow-Up
 
-This pass focuses on the CLI workflows developers feel immediately:
-
-- `lokalvault diff .env`
-- `lokalvault copy`
-- `lokalvault add --clipboard`
-- shell-history warning for inline secret values
-- richer `lokalvault status`
-- `lokalvault shell`
-- `lokalvault init --template ...`
-
-## Deferred Work
+This pass focuses on CLI correctness and live-reload workflows:
 
 - `lokalvault run` signal passthrough
 - `lokalvault run --watch`
+
+## Deferred Work
+
 - `lokalvault extend`
 - `Part 2` UI work

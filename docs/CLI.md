@@ -17,6 +17,16 @@ lokalvault run -- python3 app.py
 lokalvault run -- python3 app.py
 ```
 
+`Ctrl+C` is forwarded to the child process so the app can shut down cleanly.
+
+### Run with watch mode
+
+```bash
+lokalvault run --watch -- python3 app.py
+```
+
+LokalVault restarts the child when files in the current directory change.
+
 ### Open a shell with secrets loaded
 
 ```bash

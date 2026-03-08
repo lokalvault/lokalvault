@@ -145,6 +145,8 @@ enum Commands {
     Run {
         #[arg(long)]
         project: Option<String>,
+        #[arg(long)]
+        watch: bool,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -379,7 +381,11 @@ async fn main() {
                 eprintln!("{message}");
             })
         }
-        Commands::Run { project, command } => run_cmd::cmd_run_entry(project.as_deref(), command)
+        Commands::Run {
+            project,
+            watch,
+            command,
+        } => run_cmd::cmd_run_entry(project.as_deref(), command, watch)
             .await
             .map(|_| ()),
     };
