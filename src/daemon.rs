@@ -87,6 +87,29 @@ impl DaemonError {
     }
 }
 
+#[derive(Debug)]
+pub enum FetchSecretsError {
+    ProjectNotFound(String),
+    InvalidToken,
+    PidMismatch,
+    UidMismatch,
+    Expired,
+    State(String),
+}
+
+impl FetchSecretsError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::ProjectNotFound(project) => format!("project not found: {project}"),
+            Self::InvalidToken => "token invalid".to_string(),
+            Self::PidMismatch => "client-reported pid mismatch".to_string(),
+            Self::UidMismatch => "client-reported uid mismatch".to_string(),
+            Self::Expired => "token expired".to_string(),
+            Self::State(message) => message.clone(),
+        }
+    }
+}
+
 enum PocRequest {
     GetSecret {
         key: String,
@@ -205,6 +228,37 @@ pub fn register_token_phase2(
     record.state = TokenState::Active;
     record.deadline = Instant::now() + session_timeout;
     Ok(())
+}
+
+pub fn fetch_all_secrets(
+    state: &DaemonState,
+    token: &str,
+    pid: u32,
+    uid: u32,
+) -> Result<HashMap<String, String>, FetchSecretsError> {
+    let project = match validate_token(state, token, pid, uid) {
+        TokenValidation::Valid(project) => project,
+        TokenValidation::InvalidToken => return Err(FetchSecretsError::InvalidToken),
+        TokenValidation::PidMismatch => return Err(FetchSecretsError::PidMismatch),
+        TokenValidation::UidMismatch => return Err(FetchSecretsError::UidMismatch),
+        TokenValidation::Expired => return Err(FetchSecretsError::Expired),
+    };
+
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|e| FetchSecretsError::State(e.to_string()))?;
+    let project_data = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .ok_or_else(|| FetchSecretsError::ProjectNotFound(project.clone()))?;
+
+    Ok(project_data
+        .secrets
+        .iter()
+        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .collect())
 }
 
 pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> TokenValidation {
@@ -570,6 +624,27 @@ mod tests {
 
         let validation = validate_token(&state, "token-1", 777, 999);
         assert_eq!(validation, TokenValidation::UidMismatch);
+    }
+
+    #[test]
+    fn test_fetch_all_secrets_returns_project_map_for_valid_token() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+        register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
+
+        let secrets = fetch_all_secrets(&state, "token-1", 777, 501).unwrap();
+        assert_eq!(
+            secrets.get("OPENAI_KEY"),
+            Some(&"test-value-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_fetch_all_secrets_rejects_invalid_token() {
+        let state = sample_daemon_state();
+        let error = fetch_all_secrets(&state, "missing-token", 777, 501).unwrap_err();
+
+        assert_eq!(error.message(), "token invalid");
     }
 
     #[test]

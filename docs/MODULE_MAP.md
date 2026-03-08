@@ -176,6 +176,7 @@ Must use `#[cfg(target_os)]` conditional compilation. Test both platforms.
 - Returns the child process exit status
 - Verified with a Python child-process test
 - Verified by the real CLI demo command that prints `test-value-123`
+- Real run groundwork now includes terminal PIN approval, `.lokalvault` project config reading, token-aware daemon secret fetch, and env metadata injection helpers
 
 **Two-phase token registration (critical — do not simplify):**
 ```

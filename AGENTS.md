@@ -54,8 +54,8 @@ The UI is a later thin layer over the Rust core and CLI, not the source of truth
 | 6    | Integration Tests | `tests/`      | ✅ DONE     |
 | 7    | Errors       | `src/errors.rs`   | ✅ DONE     |
 | 8    | Daemon Real  | `src/daemon.rs`   | ✅ DONE     |
-| 9    | Run Real     | `src/run_cmd.rs`  | 🔄 NEXT     |
-| 10   | CLI          | `src/cli.rs`      | ⬜ PENDING  |
+| 9    | Run Real     | `src/run_cmd.rs`  | ✅ DONE     |
+| 10   | CLI          | `src/cli.rs`      | 🔄 NEXT     |
 | 11   | Audit Log    | `src/audit_log.rs` | ⬜ PENDING |
 | 12   | Settings     | `src/settings.rs` | ⬜ PENDING  |
 | 13   | Tauri Init   | `src-tauri/`      | ⬜ PHASE 1C |
@@ -63,7 +63,7 @@ The UI is a later thin layer over the Rust core and CLI, not the source of truth
 
 Current next module from `docs/MODULE_MAP.md`:
 
-- `src/run_cmd.rs` - replace the POC run command with the real token-aware flow next
+- `src/cli.rs` - build the full CLI command surface next
 
 Do not jump ahead into later modules unless the user explicitly asks.
 Build one module at a time and keep completed modules stable.
@@ -181,7 +181,7 @@ The live codebase is smaller than the full spec.
 - `src/crypto.rs`: salt/nonce generation, key derivation, encrypt/decrypt, unit tests
 - `src/vault_file.rs`: vault structs, binary layout, read/write helpers, unit tests
 - `src/daemon.rs`: POC Unix socket server, Linux SO_PEERCRED support, macOS LOCAL_PEERCRED/getpeereid UID checks, explicit parse/validate/route flow, request-level UID mismatch rejection, required-UID enforcement for `get_secret`, placeholder PID enforcement for Linux requests, explicit internal daemon error variants, structured JSON error responses, plus real daemon token/state groundwork and tests
-- `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, and env injection test
+- `src/run_cmd.rs`: POC process spawning with daemon request, required UID field, placeholder PID field, structured daemon error handling, plus real terminal PIN/config/token-aware helpers and tests
 - `src/vault_ops.rs`: full CRUD and validation layer with unit tests
 - `src/errors.rs`: shared application error enum with unit tests and minimal `vault_ops` integration
 - `tests/`: integration scaffolding with `vault_roundtrip`, `poc_demo`, and `end_to_end` coverage placeholders
