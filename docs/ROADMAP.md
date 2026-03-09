@@ -18,9 +18,9 @@
 - `v0.1.9-pre-phase1c-complete`
 - `v0.1.10-docs-sync`
 
-## Current Milestone - Pre-UI Truth Alignment
+## Current Milestone - UI Contract Frozen
 
-This pass freezes the backend/UI contract in small reviewable phases:
+The backend/UI contract is now frozen for UI work. The truth-alignment pass completed in these phases:
 
 - Phase A - password model alignment
 - Phase B - secret boundary alignment
@@ -29,6 +29,10 @@ This pass freezes the backend/UI contract in small reviewable phases:
 - Phase E - CLI documentation and caveat completion
 - Phase F - UX messaging cleanup
 - Phase G - UI contract freeze
+
+Next:
+- `Part 2` UI work begins
+- backend-only changes pause unless UI integration exposes a concrete defect
 
 ## Deferred Work
 
