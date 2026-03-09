@@ -167,7 +167,7 @@ pub fn import_dotenv(
         }
 
         let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key.trim(), strip_surrounding_quotes(value.trim())),
+            Some((key, value)) => (key.trim(), normalize_dotenv_value(value.trim())),
             None => {
                 skipped += 1;
                 continue;
@@ -179,7 +179,7 @@ pub fn import_dotenv(
             continue;
         }
 
-        match add_secret(vault, project, key, value) {
+        match add_secret(vault, project, key, &value) {
             Ok(()) => imported += 1,
             Err(_) => skipped += 1,
         }
@@ -221,14 +221,16 @@ fn validate_project_name(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn strip_surrounding_quotes(s: &str) -> &str {
-    if s.len() >= 2
+fn normalize_dotenv_value(s: &str) -> String {
+    let stripped = if s.len() >= 2
         && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
     {
         &s[1..s.len() - 1]
     } else {
         s
-    }
+    };
+
+    stripped.replace("\\\"", "\"").replace("\\'", "'")
 }
 
 fn validate_secret_key(key: &str) -> Result<(), AppError> {

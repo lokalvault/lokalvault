@@ -59,13 +59,19 @@ fn test_real_token_flow_across_run_and_daemon_modules() {
 #[test]
 fn test_project_config_roundtrip_for_real_run_path() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = fs::remove_file(".lokalvault");
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-project-config-roundtrip");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
     fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
 
     let project = get_project_from_config().unwrap();
     assert_eq!(project, Some("my-app".to_string()));
 
     let _ = fs::remove_file(".lokalvault");
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
 }
 
 #[test]
@@ -89,7 +95,11 @@ fn test_run_without_project_or_config_errors_cleanly() {
 #[test]
 fn test_run_with_project_config_uses_project_automatically() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = fs::remove_file(".lokalvault");
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-run-project-config");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
     fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
 
     let socket = "/tmp/lokalvault-test.sock";
@@ -122,6 +132,8 @@ fn test_run_with_project_config_uses_project_automatically() {
     let _ = daemon.wait();
     let _ = fs::remove_file(socket);
     let _ = fs::remove_file(".lokalvault");
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "test-value-123\n");
@@ -573,7 +585,11 @@ fn test_status_includes_session_expiry_and_stale_secret_summary() {
 #[test]
 fn test_run_passthrough_preserves_child_exit_code() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = fs::remove_file(".lokalvault");
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-run-exit-code");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
     fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
 
     let socket = "/tmp/lokalvault-test.sock";
@@ -599,6 +615,8 @@ fn test_run_passthrough_preserves_child_exit_code() {
     let _ = daemon.wait();
     let _ = fs::remove_file(socket);
     let _ = fs::remove_file(".lokalvault");
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
 
     assert_eq!(output.status.code(), Some(7));
 }
