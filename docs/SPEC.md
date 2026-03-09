@@ -100,6 +100,19 @@ clipboard-safe secret handling, and project templates land before any UI work.
 
 ---
 
+### CLARIFIED: Daemon bootstrap password transfer is a local startup boundary
+**Why:** The current implementation starts the detached daemon by passing the
+decrypted vault and master password once over the daemon's stdin pipe at unlock.
+That is not the same as the long-lived runtime Unix socket IPC channel, which
+must remain password-free. The product docs should describe this honestly.
+
+**What this means:**
+- runtime CLI → daemon socket IPC does not carry the master password
+- the daemon startup/bootstrap path currently does
+- the daemon remains the only long-lived holder after startup
+
+---
+
 # PART 1 — WHAT LOKALVAULT IS
 
 ## The Problem

@@ -124,10 +124,19 @@ lokalvault init --template stripe
 ## Safety Notes
 
 - Prefer prompted values or `--clipboard` over inline secret arguments.
+- `lokalvault get` prints the secret value; prefer `lokalvault copy` when you only need to paste it elsewhere.
 - `lokalvault copy` never prints secret values.
 - `lokalvault diff .env` never prints secret values.
 - Clipboard clearing is best-effort.
 - Secret values are zeroized in daemon-owned memory where practical, but JSON IPC responses become plain strings at the daemon → CLI boundary.
+
+## Security Model In Practice
+
+- The daemon is the only long-lived process that should hold the master password.
+- Unlock currently bootstraps the daemon by sending the password once over the daemon startup stdin pipe.
+- Runtime socket IPC requests do not carry the master password.
+- Secret values become plain strings at unavoidable boundaries such as JSON IPC responses, child process environments, and the system clipboard.
+- `lokalvault push` may pass secret values through third-party CLI argument handling depending on the target platform CLI.
 
 ## Common Failures And Fixes
 
@@ -143,6 +152,13 @@ lokalvault init --template stripe
   - Use interactive prompt mode instead of `copy` or `--clipboard`
 - `push target CLI missing`
   - Install the target platform CLI (`vercel`, `fly`, `railway`, etc.) and retry
+
+## Known Platform And Workflow Caveats
+
+- `run --watch` is a first-version recursive watcher on the current directory with no ignore rules or debounce yet.
+- Audit `process_name` and `exe_path` fields are informational only, not kernel-verified process identity.
+- macOS currently verifies peer UID but does not expose a reliable peer PID through the current socket credential path.
+- `push` depends on third-party CLIs and their current argument conventions.
 
 ## Repo Protection
 

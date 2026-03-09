@@ -18,14 +18,17 @@
 - `v0.1.9-pre-phase1c-complete`
 - `v0.1.10-docs-sync`
 
-## Current Milestone - Backend Finalization
+## Current Milestone - Pre-UI Truth Alignment
 
-This pass settles the backend contract before UI:
+This pass freezes the backend/UI contract in small reviewable phases:
 
-- security/docs alignment at the daemon/IPC boundary
-- full CLI documentation coverage
-- final status/dashboard polish
-- push subprocess correctness
+- Phase A - password model alignment
+- Phase B - secret boundary alignment
+- Phase C - push contract hardening
+- Phase D - status and audit honesty
+- Phase E - CLI documentation and caveat completion
+- Phase F - UX messaging cleanup
+- Phase G - UI contract freeze
 
 ## Deferred Work
 

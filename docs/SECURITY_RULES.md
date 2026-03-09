@@ -15,7 +15,7 @@ All other files call functions from `crypto.rs`.
 
 ---
 
-## RULE 2 — Never transmit or persist the master password
+## RULE 2 — Never persist the master password, and keep transfer boundaries explicit
 
 The master password is used ONCE at vault creation and ONCE at unlock.
 
@@ -25,6 +25,11 @@ After unlock:
 - It is NEVER sent over IPC from CLI → daemon
 - It is NEVER logged
 - It is dropped when the daemon shuts down or the vault locks
+
+Current implementation note:
+- LokalVault currently bootstraps the daemon by sending the password once over the daemon's stdin pipe during unlock/startup.
+- This is a local one-time daemon bootstrap boundary, not the runtime Unix-socket IPC channel.
+- All ongoing CLI → daemon socket requests must remain password-free.
 
 The daemon is the ONLY process that may hold the password in memory.
 No CLI process, no Tauri renderer, no SDK may ever receive it.
