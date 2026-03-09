@@ -26,6 +26,7 @@ use std::process::Command;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use zeroize::Zeroize;
 
 #[cfg(test)]
 static TEST_PASSWORDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
@@ -1326,6 +1327,8 @@ fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String
         .ok_or_else(|| "failed to open daemon stdin".to_string())?
         .write_all(&payload)
         .map_err(|e| e.to_string())?;
+    let mut payload = payload;
+    payload.zeroize();
 
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {

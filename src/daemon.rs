@@ -9,6 +9,7 @@ use std::mem;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,7 +53,7 @@ struct TokenRecord {
 #[derive(Clone)]
 pub struct DaemonState {
     vault: Arc<Mutex<VaultData>>,
-    token_store: Arc<Mutex<HashMap<String, TokenRecord>>>,
+    token_store: Arc<Mutex<Vec<(String, TokenRecord)>>>,
     password: Arc<Mutex<Zeroizing<String>>>,
     last_activity: Arc<Mutex<Instant>>,
     started_at: Arc<Mutex<Instant>>,
@@ -149,6 +150,8 @@ pub async fn run_daemon_poc() -> Result<(), String> {
 
 pub async fn run_daemon_server(vault_data: VaultData, password: String) -> Result<(), String> {
     let _settings = read_settings();
+    let _ = disable_core_dumps();
+    let _ = lock_memory_pages();
     let (socket_path, listener) = create_user_socket()?;
     run_daemon_server_with_listener(vault_data, password, socket_path, listener).await
 }
@@ -208,7 +211,7 @@ pub fn start_daemon(vault_data: VaultData) -> DaemonState {
 pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> DaemonState {
     DaemonState {
         vault: Arc::new(Mutex::new(vault_data)),
-        token_store: Arc::new(Mutex::new(HashMap::new())),
+        token_store: Arc::new(Mutex::new(Vec::new())),
         password: Arc::new(Mutex::new(Zeroizing::new(password))),
         last_activity: Arc::new(Mutex::new(Instant::now())),
         started_at: Arc::new(Mutex::new(Instant::now())),
@@ -263,10 +266,15 @@ async fn run_poc_server_with_listener(
 pub fn create_socket_at_path(socket_path: PathBuf) -> Result<(PathBuf, UnixListener), String> {
     cleanup_socket_file(&socket_path)?;
 
-    let listener = UnixListener::bind(&socket_path).map_err(|e| e.to_string())?;
+    let std_listener = StdUnixListener::bind(&socket_path).map_err(|e| e.to_string())?;
 
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
+
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| e.to_string())?;
+    let listener = UnixListener::from_std(std_listener).map_err(|e| e.to_string())?;
 
     Ok((socket_path, listener))
 }
@@ -283,7 +291,7 @@ pub fn register_token_phase1(
     project: &str,
 ) -> Result<(), String> {
     let mut token_store = state.token_store.lock().map_err(|e| e.to_string())?;
-    token_store.insert(
+    token_store.push((
         token.to_string(),
         TokenRecord {
             uid,
@@ -292,7 +300,7 @@ pub fn register_token_phase1(
             state: TokenState::Pending,
             deadline: Instant::now() + PHASE1_PENDING_WINDOW,
         },
-    );
+    ));
 
     Ok(())
 }
@@ -305,11 +313,13 @@ pub fn register_token_phase2(
 ) -> Result<(), String> {
     let mut token_store = state.token_store.lock().map_err(|e| e.to_string())?;
     let record = token_store
-        .get_mut(token)
+        .iter_mut()
+        .find(|(stored_token, _)| constant_time_compare(stored_token, token))
+        .map(|(_, record)| record)
         .ok_or_else(|| "token invalid".to_string())?;
 
     if Instant::now() > record.deadline {
-        token_store.remove(token);
+        token_store.retain(|(stored_token, _)| !constant_time_compare(stored_token, token));
         return Err("token expired".to_string());
     }
 
@@ -547,7 +557,7 @@ pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> T
 
 pub fn invalidate_token(state: &DaemonState, token: &str) -> Result<(), String> {
     let mut token_store = state.token_store.lock().map_err(|e| e.to_string())?;
-    token_store.remove(token);
+    token_store.retain(|(stored_token, _)| !constant_time_compare(stored_token, token));
     Ok(())
 }
 
@@ -626,11 +636,11 @@ pub fn monitor_child_pid(
     })
 }
 
-fn get_password(state: &DaemonState) -> Result<String, String> {
+fn get_password(state: &DaemonState) -> Result<Zeroizing<String>, String> {
     state
         .password
         .lock()
-        .map(|pw| pw.to_string())
+        .map(|pw| Zeroizing::new(pw.to_string()))
         .map_err(|e| e.to_string())
 }
 
@@ -1153,7 +1163,11 @@ mod tests {
         register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
 
         let token_store = state.token_store.lock().unwrap();
-        let record = token_store.get("token-1").unwrap();
+        let record = token_store
+            .iter()
+            .find(|(token, _)| token == "token-1")
+            .map(|(_, record)| record)
+            .unwrap();
         assert_eq!(record.uid, 501);
         assert_eq!(record.pid, 0);
         assert_eq!(record.project, "my-app");
@@ -1168,7 +1182,11 @@ mod tests {
         register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
 
         let token_store = state.token_store.lock().unwrap();
-        let record = token_store.get("token-1").unwrap();
+        let record = token_store
+            .iter()
+            .find(|(token, _)| token == "token-1")
+            .map(|(_, record)| record)
+            .unwrap();
         assert_eq!(record.pid, 777);
         assert_eq!(record.state, TokenState::Active);
     }
@@ -1230,8 +1248,13 @@ mod tests {
         register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
         {
             let mut token_store = state.token_store.lock().unwrap();
-            token_store.get_mut("token-1").unwrap().deadline =
-                Instant::now() - Duration::from_secs(1);
+            token_store
+                .iter_mut()
+                .find(|(token, _)| token == "token-1")
+                .map(|(_, record)| {
+                    record.deadline = Instant::now() - Duration::from_secs(1);
+                })
+                .unwrap();
         }
 
         let error =
@@ -1254,7 +1277,7 @@ mod tests {
         handle.await.unwrap();
 
         let token_store = state.token_store.lock().unwrap();
-        assert!(!token_store.contains_key("token-1"));
+        assert!(!token_store.iter().any(|(token, _)| token == "token-1"));
     }
 
     #[test]

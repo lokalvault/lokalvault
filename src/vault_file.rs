@@ -136,8 +136,14 @@ pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
     }
     let tmp_path = get_temp_vault_path(&path);
     let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
-    std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
+    if let Err(error) = std::io::Write::write_all(&mut file, &bytes) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error.to_string());
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error.to_string());
+    }
     drop(file);
     fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
 

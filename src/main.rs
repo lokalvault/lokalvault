@@ -5,6 +5,7 @@ use clap_complete::{
 };
 use lokalvault::{cli, daemon, run_cmd};
 use std::io::Read;
+use zeroize::Zeroize;
 
 #[derive(Parser)]
 #[command(name = "lokalvault")]
@@ -170,6 +171,7 @@ async fn main() {
             std::io::stdin().read_to_end(&mut input).unwrap();
             let (vault, password): (lokalvault::vault_file::VaultData, String) =
                 serde_json::from_slice(&input).unwrap();
+            input.zeroize();
             daemon::run_daemon_server(vault, password).await.map(|_| ())
         }
         Commands::Create => cli::cmd_create().map(|message| {
