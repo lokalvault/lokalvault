@@ -129,6 +129,8 @@ lokalvault init --template stripe
 - `lokalvault diff .env` never prints secret values.
 - Clipboard clearing is best-effort.
 - Secret values are zeroized in daemon-owned memory where practical, but JSON IPC responses become plain strings at the daemon → CLI boundary.
+- `status` shows a session expiry estimate derived from daemon uptime and configured timeout.
+- stale-secret counts come from audit history and may be incomplete if logs were cleared.
 
 ## Security Model In Practice
 

@@ -560,7 +560,7 @@ pub fn cmd_status() -> Result<String, String> {
                 let uptime_seconds = status["uptime_seconds"].as_u64().unwrap_or(0);
                 let remaining_minutes = timeout_minutes.saturating_sub(uptime_seconds / 60);
                 lines.push(format!(
-                    "Session expires in: {}h {}m",
+                    "Session expires in (estimate): {}h {}m",
                     remaining_minutes / 60,
                     remaining_minutes % 60
                 ));
@@ -578,7 +578,7 @@ pub fn cmd_status() -> Result<String, String> {
                 }
                 let stale = count_stale_secret_keys(&recent, 30)?;
                 lines.push(format!(
-                    "Stale secrets: {stale} secrets not accessed in 30+ days"
+                    "Stale secrets (from audit history): {stale} secrets not accessed in 30+ days"
                 ));
             }
             if dotenv_warning {
