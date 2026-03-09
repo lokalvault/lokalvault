@@ -152,6 +152,8 @@ lokalvault init --template stripe
   - Use interactive prompt mode instead of `copy` or `--clipboard`
 - `push target CLI missing`
   - Install the target platform CLI (`vercel`, `fly`, `railway`, etc.) and retry
+- `push may expose values through target CLI behavior`
+  - LokalVault warns before pushing. Prefer reviewing the target CLI's own handling if this matters for your environment.
 
 ## Known Platform And Workflow Caveats
 

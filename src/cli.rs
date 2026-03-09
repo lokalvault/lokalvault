@@ -733,6 +733,10 @@ pub fn cmd_push(
         secrets.len(),
         push_target_name(target)
     );
+    eprintln!(
+        "Warning: {} may pass secret values through third-party CLI arguments.",
+        push_target_name(target)
+    );
 
     if !matches!(target, PushTarget::Vercel) && environment != "production" {
         eprintln!(
