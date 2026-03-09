@@ -168,6 +168,8 @@ async fn cmd_run_watch(
 
     let (tx, mut rx) = watch::channel(false);
     let watcher = start_watch_thread(tx)?;
+    eprintln!("Watch mode active. Monitoring all files in current directory.");
+    eprintln!("Note: no debounce or ignore rules applied in this version.");
     loop {
         let mut child = spawn_run_child(project, &command).await?;
         let status = wait_with_signal_passthrough(&mut child, Some(&mut rx)).await?;

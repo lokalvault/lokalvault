@@ -117,6 +117,7 @@ lokalvault init --template stripe
 
 - `lokalvault protect-repo [--project <name>]` — install a safe pre-commit hook
 - `lokalvault scan-diff [--project <name>]` — read a staged diff from stdin and block on secret values
+- `lokalvault push <project> --target <vercel|render|railway|fly|netlify> [--env <env>]` — push all project secrets to a deployment target
 
 ### Planned
 
@@ -140,6 +141,13 @@ lokalvault init --template stripe
 - Runtime socket IPC requests do not carry the master password.
 - Secret values become plain strings at unavoidable boundaries such as JSON IPC responses, child process environments, and the system clipboard.
 - `lokalvault push` may pass secret values through third-party CLI argument handling depending on the target platform CLI.
+
+## What Is Estimated vs Authoritative
+
+Authoritative: vault state, project/key names, audit log entries
+
+Estimated: session expiry (daemon uptime + configured timeout),
+stale secret count (audit history only — may be incomplete)
 
 ## Common Failures And Fixes
 
