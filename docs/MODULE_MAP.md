@@ -57,6 +57,10 @@ If you're unsure where something goes: check this file first.
 - `Project { name: String, secrets: Vec<Secret> }`
 - `Secret { key: String, value: String }`
 
+The current implementation zeroizes daemon-owned vault memory on lock/shutdown,
+but the serialized file model and many caller-facing APIs still expose values as
+plain `String` at unavoidable boundaries.
+
 **Binary format (must not change):**
 ```
 Offset  Size  Field
@@ -91,7 +95,7 @@ Offset  Size  Field
 **Validation rules (enforced here):**
 - Project names: alphanumeric + hyphens only, max 64 chars, unique
 - Secret keys: SCREAMING_SNAKE_CASE only (A-Z, 0-9, _), unique per project
-- Secret values: any string; daemon-owned memory should zeroize where practical, but JSON IPC responses are plain strings by necessity
+- Secret values: any string; daemon-owned memory should zeroize where practical, but JSON IPC responses, child env injection, and clipboard/subprocess boundaries still become plain strings by necessity
 
 **Current implementation status:**
 - CRUD and validation layer implemented
@@ -225,6 +229,7 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 - Group 3 pre-Phase-1C additions live here too: `cmd_ai_safe`, `cmd_share`, and `cmd_claim`
 - Group 4 pre-Phase-1C additions live here too: `cmd_scan_diff` and `cmd_protect_repo`
 - Part 1B additions live here too: `cmd_diff`, `cmd_copy`, `cmd_shell`, clipboard-aware `cmd_add`, richer `cmd_status`, and `cmd_init` templates
+- Pre-UI truth-alignment work lives here too: messaging cleanup, push caveat handling, and status wording that matches underlying daemon/audit reality
 
 `.lokalvault` is now TOML-backed and may include `[project]` and `[keys]`
 sections. Required keys enforcement for `run` depends on that manifest.

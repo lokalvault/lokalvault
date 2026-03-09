@@ -51,6 +51,11 @@ Required behavior:
 - CLI code must minimize time-in-scope after receiving a secret value
 - docs and code must not claim full end-to-end zeroization beyond the IPC boundary
 
+Additional unavoidable boundaries:
+- child process environment injection (`run`, `shell`)
+- system clipboard flows (`copy`, `add --clipboard`)
+- third-party deployment CLIs where command arguments carry values (`push` targets)
+
 ```rust
 // CORRECT inside daemon-owned memory
 let value = Zeroizing::new(secret_string);
