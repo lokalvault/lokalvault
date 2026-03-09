@@ -474,7 +474,9 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
 
 pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String, String> {
     let project = resolve_project(project)?;
-    eprintln!("Secrets now in shell. Clear with: unset KEY");
+    if matches!(format, ExportFormat::Eval) {
+        eprintln!("Eval output can be sourced into your shell. Clear with: unset KEY");
+    }
 
     let secrets = get_project_secret_map(&project)?;
 

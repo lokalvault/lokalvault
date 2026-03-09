@@ -88,6 +88,7 @@ lokalvault init --template stripe
 - `lokalvault copy [project] KEY` — copy a secret to clipboard without printing it
 - `lokalvault import <path> --project <name>` — import dotenv-style secrets
 - `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format
+- `lokalvault export [project] --format dotenv|json|eval` — export a project; only `eval` is meant to be sourced into a shell
 - `lokalvault diff <path> [--project <name>]` — compare a dotenv file against the vault without printing values
 
 ### Run flows
@@ -163,6 +164,7 @@ lokalvault init --template stripe
 - Audit `process_name` and `exe_path` fields are informational only, not kernel-verified process identity.
 - macOS currently verifies peer UID but does not expose a reliable peer PID through the current socket credential path.
 - `push` depends on third-party CLIs and their current argument conventions.
+- `dev` is a best-effort detector for common local run commands, not a guaranteed project-aware launcher.
 
 ## Repo Protection
 
