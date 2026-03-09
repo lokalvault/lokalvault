@@ -9,6 +9,15 @@ lokalvault init --template openai
 lokalvault run -- python3 app.py
 ```
 
+## Project Resolution Order
+
+When a command needs a project, LokalVault resolves it in this order:
+
+1. `--project <name>`
+2. `.lokalvault` in the current directory
+3. `settings.default_project`
+4. error
+
 ## Daily Workflows
 
 ### Run a command with secrets
@@ -57,12 +66,83 @@ lokalvault add --project my-app STRIPE_SECRET --clipboard
 lokalvault init --template stripe
 ```
 
+## Command Guide
+
+### Vault lifecycle
+
+- `lokalvault create` — create a new encrypted vault
+- `lokalvault unlock` — unlock the vault and start the daemon session
+- `lokalvault lock` — stop the daemon session and clear in-memory state
+- `lokalvault status` — show vault state, session estimate, recent access, and warnings
+- `lokalvault doctor` — check vault, daemon, `.gitignore`, and `.lokalvault` basics
+
+### Project setup and secret management
+
+- `lokalvault init [name] [--template openai|supabase|stripe]` — create `.lokalvault`
+- `lokalvault add [--project <name>] KEY [value] [--clipboard]` — add a secret
+- `lokalvault update [--project <name>] KEY [value]` — update a secret
+- `lokalvault delete [--project <name>] KEY` — delete a secret
+- `lokalvault delete-project <name>` — delete an entire project
+- `lokalvault list [project]` — list projects or keys
+- `lokalvault get [project] KEY` — print a secret value
+- `lokalvault copy [project] KEY` — copy a secret to clipboard without printing it
+- `lokalvault import <path> --project <name>` — import dotenv-style secrets
+- `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format
+- `lokalvault diff <path> [--project <name>]` — compare a dotenv file against the vault without printing values
+
+### Run flows
+
+- `lokalvault run [--project <name>] -- <command ...>` — run a command with secrets injected
+- `lokalvault run --watch -- <command ...>` — rerun when files change
+- `lokalvault shell [--project <name>]` — open a subshell with project secrets loaded
+- `lokalvault dev` — detect a local dev command and run it through LokalVault
+
+### Audit and configuration
+
+- `lokalvault audit [--project ...] [--since 7d] [--method ...] [--process-name ...]` — read audit history
+- `lokalvault audit-clear` — clear audit history after confirmation
+- `lokalvault config get <key>` — read a setting
+- `lokalvault config set <key> <value>` — write a setting
+- `lokalvault config list` — list settings
+- `lokalvault completion <bash|zsh|fish>` — print shell completions
+
+### AI-safe and sharing workflows
+
+- `lokalvault ai-safe [--project <name>] [--generate-example]` — write `.lokalvault`, AI guidance, and gitignore protections
+- `lokalvault share <project> [--output file.lve]` — create an encrypted share bundle
+- `lokalvault claim <file.lve> [--project <name>]` — import a shared secret bundle
+
+### Repo protection
+
+- `lokalvault protect-repo [--project <name>]` — install a safe pre-commit hook
+- `lokalvault scan-diff [--project <name>]` — read a staged diff from stdin and block on secret values
+
+### Planned
+
+- `lokalvault extend` — planned; not implemented in this backend pass
+
 ## Safety Notes
 
 - Prefer prompted values or `--clipboard` over inline secret arguments.
 - `lokalvault copy` never prints secret values.
 - `lokalvault diff .env` never prints secret values.
 - Clipboard clearing is best-effort.
+- Secret values are zeroized in daemon-owned memory where practical, but JSON IPC responses become plain strings at the daemon → CLI boundary.
+
+## Common Failures And Fixes
+
+- `daemon not running`
+  - Run `lokalvault unlock`
+- `stale socket`
+  - Run `lokalvault lock` and then `lokalvault unlock`
+- `vault locked`
+  - Unlock first, or rerun the command and provide the master password when prompted
+- `missing required secrets`
+  - Check `.lokalvault` required keys and add the missing values
+- `clipboard unavailable`
+  - Use interactive prompt mode instead of `copy` or `--clipboard`
+- `push target CLI missing`
+  - Install the target platform CLI (`vercel`, `fly`, `railway`, etc.) and retry
 
 ## Repo Protection
 

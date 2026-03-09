@@ -31,17 +31,29 @@ No CLI process, no Tauri renderer, no SDK may ever receive it.
 
 ---
 
-## RULE 3 — Secret values use Zeroizing<>
+## RULE 3 — Secret values are zeroized in daemon-owned memory, with an IPC boundary exception
 
-Any variable holding a secret value MUST use `Zeroizing<String>` or
-`Zeroizing<Vec<u8>>`. This ensures the memory is overwritten when the
-variable goes out of scope.
+Daemon-owned secret values should use `Zeroizing<String>` or `Zeroizing<Vec<u8>>`
+where practical so memory is overwritten when those values go out of scope.
+
+There is one explicit exception: when a secret crosses the daemon → CLI IPC
+boundary inside a JSON response, it becomes a plain string by necessity.
+That boundary cannot be fully zeroized end-to-end with the current JSON IPC
+design.
+
+Required behavior:
+- daemon RAM should zeroize secret-bearing owned values where possible
+- CLI code must minimize time-in-scope after receiving a secret value
+- docs and code must not claim full end-to-end zeroization beyond the IPC boundary
 
 ```rust
-// CORRECT
+// CORRECT inside daemon-owned memory
 let value = Zeroizing::new(secret_string);
 
-// WRONG — value stays in memory after drop
+// IPC boundary exception — unavoidable plain string at JSON boundary
+let response = json!({ "value": plain_secret_string });
+
+// WRONG when avoidable in daemon-owned memory
 let value = secret_string;
 ```
 

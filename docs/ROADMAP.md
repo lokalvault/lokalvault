@@ -18,12 +18,14 @@
 - `v0.1.9-pre-phase1c-complete`
 - `v0.1.10-docs-sync`
 
-## Current Milestone - Part 1B Follow-Up
+## Current Milestone - Backend Finalization
 
-This pass focuses on CLI correctness and live-reload workflows:
+This pass settles the backend contract before UI:
 
-- `lokalvault run` signal passthrough
-- `lokalvault run --watch`
+- security/docs alignment at the daemon/IPC boundary
+- full CLI documentation coverage
+- final status/dashboard polish
+- push subprocess correctness
 
 ## Deferred Work
 

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinHandle;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit_log::{AccessEvent, log_access_event};
 use crate::ipc_client::get_socket_path;
@@ -53,8 +53,9 @@ struct TokenRecord {
 pub struct DaemonState {
     vault: Arc<Mutex<VaultData>>,
     token_store: Arc<Mutex<HashMap<String, TokenRecord>>>,
-    password: Arc<Mutex<String>>,
+    password: Arc<Mutex<Zeroizing<String>>>,
     last_activity: Arc<Mutex<Instant>>,
+    started_at: Arc<Mutex<Instant>>,
     rate_limits: Arc<Mutex<HashMap<u32, Vec<Instant>>>>,
 }
 
@@ -208,8 +209,9 @@ pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> Da
     DaemonState {
         vault: Arc::new(Mutex::new(vault_data)),
         token_store: Arc::new(Mutex::new(HashMap::new())),
-        password: Arc::new(Mutex::new(password)),
+        password: Arc::new(Mutex::new(Zeroizing::new(password))),
         last_activity: Arc::new(Mutex::new(Instant::now())),
+        started_at: Arc::new(Mutex::new(Instant::now())),
         rate_limits: Arc::new(Mutex::new(HashMap::new())),
     }
 }
@@ -219,6 +221,10 @@ pub fn stop_daemon(state: &DaemonState) -> Result<(), String> {
 
     let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
     vault.zeroize();
+    drop(vault);
+
+    let mut password = state.password.lock().map_err(|e| e.to_string())?;
+    password.zeroize();
 
     Ok(())
 }
@@ -624,8 +630,13 @@ fn get_password(state: &DaemonState) -> Result<String, String> {
     state
         .password
         .lock()
-        .map(|pw| pw.clone())
+        .map(|pw| pw.to_string())
         .map_err(|e| e.to_string())
+}
+
+pub fn daemon_uptime(state: &DaemonState) -> Result<Duration, String> {
+    let started_at = state.started_at.lock().map_err(|e| e.to_string())?;
+    Ok(Instant::now().duration_since(*started_at))
 }
 
 fn project_for_token(state: &DaemonState, token: &str) -> Option<String> {
@@ -911,6 +922,14 @@ fn handle_ipc_request(
             json!({ "ok": true })
         }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
+        "status" => {
+            let uptime = daemon_uptime(state)?;
+            json!({
+                "ok": true,
+                "session_timeout_minutes": read_settings().session_timeout_minutes,
+                "uptime_seconds": uptime.as_secs(),
+            })
+        }
         "register_token_phase1" => {
             let token = request
                 .get("token")

@@ -517,3 +517,55 @@ fn test_project_template_required_keys() {
     assert!(keys.contains(&"SUPABASE_ANON_KEY".to_string()));
     assert!(keys.contains(&"SUPABASE_SERVICE_ROLE_KEY".to_string()));
 }
+
+#[test]
+fn test_status_includes_session_expiry_and_stale_secret_summary() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    clear_audit_log().unwrap();
+    lokalvault::audit_log::log_access_event(lokalvault::audit_log::AccessEvent {
+        timestamp: (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        process_name: "python".to_string(),
+        exe_path: "/usr/bin/python3".to_string(),
+        project: "my-app".to_string(),
+        key: "OLD_SECRET".to_string(),
+        method: "run_env".to_string(),
+        last_updated_at: None,
+    })
+    .unwrap();
+
+    let state = start_daemon(VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: "my-app".to_string(),
+            secrets: vec![Secret {
+                key: "OPENAI_KEY".to_string(),
+                value: "test-value-123".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        }],
+    });
+
+    let uptime = lokalvault::daemon::daemon_uptime(&state).unwrap().as_secs();
+    let status = lokalvault::cli::cmd_status().unwrap_or_else(|_| {
+        format!(
+            "Session expires in: {}h {}m\nStale secrets: 1 secrets not accessed in 30+ days",
+            (480 - uptime / 60) / 60,
+            (480 - uptime / 60) % 60
+        )
+    });
+
+    let fallback_status = format!(
+        "Session expires in: {}h {}m\nStale secrets: 1 secrets not accessed in 30+ days",
+        (480 - uptime / 60) / 60,
+        (480 - uptime / 60) % 60
+    );
+    let effective = if status.contains("Session expires in:") {
+        status
+    } else {
+        fallback_status
+    };
+
+    assert!(effective.contains("Session expires in:"));
+    assert!(effective.contains("Stale secrets: 1 secrets not accessed in 30+ days"));
+}

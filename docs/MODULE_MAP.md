@@ -91,7 +91,7 @@ Offset  Size  Field
 **Validation rules (enforced here):**
 - Project names: alphanumeric + hyphens only, max 64 chars, unique
 - Secret keys: SCREAMING_SNAKE_CASE only (A-Z, 0-9, _), unique per project
-- Secret values: any string, held in Zeroizing<String> during transit
+- Secret values: any string; daemon-owned memory should zeroize where practical, but JSON IPC responses are plain strings by necessity
 
 **Current implementation status:**
 - CRUD and validation layer implemented

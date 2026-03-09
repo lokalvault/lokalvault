@@ -444,7 +444,7 @@ Caller must show confirmation dialog before invoking.
 
 **add_secret(vault: &mut VaultData, project: &str, key: &str, value: &str) → Result<()>**
 Validate key: SCREAMING_SNAKE_CASE only (A-Z, 0-9, _). Unique per project.
-Value processed via Zeroizing<String> during transit. write_vault_file_atomic.
+Value is zeroized in daemon-owned memory where practical; JSON IPC responses are the unavoidable plain-string boundary. write_vault_file_atomic.
 
 **update_secret(vault: &mut VaultData, project: &str, key: &str, new_value: &str) → Result<()>**
 Find and update. write_vault_file_atomic.
@@ -458,7 +458,7 @@ Returns: { name, secret_count, last_modified }. NO secret values.
 **list_secret_keys(vault: &VaultData, project: &str) → Result<Vec<String>>**
 Key names only. NO values ever.
 
-**get_secret_for_display(vault: &VaultData, project: &str, key: &str) → Result<Zeroizing<String>>**
+**get_secret_for_display(vault: &VaultData, project: &str, key: &str) → Result<String>**
 UI only. Returns single value. UI re-masks after 30s.
 
 **change_master_password(vault: &mut VaultData, current: &str, new: &str) → Result<()>**
@@ -605,7 +605,7 @@ Full execution:
 2. Connect to daemon socket
 3. Request PIN approval via desktop app or headless terminal
 4. On approval:
-   a. fetch_all_secrets(project) → HashMap<String, Zeroizing<String>>
+   a. fetch_all_secrets(project) → HashMap<String, String>
    b. token = generate_token()
    c. daemon.register_token_phase1(token, uid, project)  ← Phase 1
    d. Build Command: set all envs (secrets + LV_RUN_TOKEN + metadata)
@@ -639,7 +639,7 @@ Also always inject:
   LV_PROJECT   = project name
   LV_SOCKET    = /tmp/lokalvault-{UID}.sock
 
-**fetch_all_secrets(project: &str) → Result<HashMap<String, Zeroizing<String>>>**
+**fetch_all_secrets(project: &str) → Result<HashMap<String, String>>**
 CLI-specific fetch (no token required — CLI was PIN-authenticated).
 Connects to daemon via a special CLI channel (socket with Phase 1 approval).
 Returns all secrets for the project, held in Zeroizing<> wrappers.

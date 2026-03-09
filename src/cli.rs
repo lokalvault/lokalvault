@@ -549,22 +549,37 @@ pub fn cmd_status() -> Result<String, String> {
     if is_daemon_running() {
         let response = send_ipc_request(json!({ "type": "project_count" }))?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            let status = send_ipc_request(json!({ "type": "status" }))?;
             lines.push("Vault:    unlocked".to_string());
             lines.push(format!(
                 "Projects: {}",
                 response["count"].as_u64().unwrap_or(0)
             ));
+            if status.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+                let timeout_minutes = status["session_timeout_minutes"].as_u64().unwrap_or(0);
+                let uptime_seconds = status["uptime_seconds"].as_u64().unwrap_or(0);
+                let remaining_minutes = timeout_minutes.saturating_sub(uptime_seconds / 60);
+                lines.push(format!(
+                    "Session expires in: {}h {}m",
+                    remaining_minutes / 60,
+                    remaining_minutes % 60
+                ));
+            }
             lines.push(format!("Version:  {}", env!("CARGO_PKG_VERSION")));
             let recent = read_audit_log(None)?;
             if !recent.is_empty() {
                 lines.push(String::new());
                 lines.push("Recent Access:".to_string());
-                for event in recent.into_iter().take(3) {
+                for event in recent.iter().take(3) {
                     lines.push(format!(
                         "  {}  {}  {}  {}",
                         event.timestamp, event.process_name, event.project, event.key
                     ));
                 }
+                let stale = count_stale_secret_keys(&recent, 30)?;
+                lines.push(format!(
+                    "Stale secrets: {stale} secrets not accessed in 30+ days"
+                ));
             }
             if dotenv_warning {
                 lines.push(String::new());
@@ -713,6 +728,11 @@ pub fn cmd_push(
 ) -> Result<String, String> {
     let environment = environment.unwrap_or("production");
     let secrets = get_project_secret_map(project)?;
+    eprintln!(
+        "Pushing {} secrets to {}...",
+        secrets.len(),
+        push_target_name(target)
+    );
 
     if !matches!(target, PushTarget::Vercel) && environment != "production" {
         eprintln!(
@@ -721,20 +741,32 @@ pub fn cmd_push(
         );
     }
 
+    let mut failures = Vec::new();
     for (key, value) in &secrets {
         eprintln!("Pushing {} to {}...", key, push_target_name(target));
         let mut cmd = platform_command(target, key, value, environment);
-        cmd.status().map_err(|e| {
+        let status = cmd.status().map_err(|e| {
             format!(
                 "{} CLI not found or failed to run: {}",
                 push_target_name(target),
                 e
             )
         })?;
+        if !status.success() {
+            failures.push(format!("{} ({status})", key));
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(format!(
+            "push failed for {}: {}",
+            push_target_name(target),
+            failures.join(", ")
+        ));
     }
 
     Ok(format!(
-        "Pushing {} secrets to {}...",
+        "✓ Pushed {} secrets to {}",
         secrets.len(),
         push_target_name(target)
     ))
@@ -1199,6 +1231,31 @@ fn response_error(response: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown daemon error")
         .to_string()
+}
+
+fn count_stale_secret_keys(
+    events: &[crate::audit_log::AccessEvent],
+    stale_days: i64,
+) -> Result<usize, String> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(stale_days);
+    let mut latest = BTreeMap::new();
+    for event in events {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map_err(|e| e.to_string())?
+            .with_timezone(&chrono::Utc);
+        latest
+            .entry((event.project.clone(), event.key.clone()))
+            .and_modify(|existing: &mut chrono::DateTime<chrono::Utc>| {
+                if timestamp > *existing {
+                    *existing = timestamp;
+                }
+            })
+            .or_insert(timestamp);
+    }
+    Ok(latest
+        .values()
+        .filter(|timestamp| **timestamp < cutoff)
+        .count())
 }
 
 fn get_setting_value(settings: &Settings, key: &str) -> Result<String, String> {
