@@ -40,7 +40,7 @@ fn test_real_token_flow_across_run_and_daemon_modules() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
-                value: "test-value-123".to_string(),
+                value: zeroize::Zeroizing::new("test-value-123".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
@@ -209,7 +209,7 @@ fn test_audit_log_records_daemon_access() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
-                value: "test-value-123".to_string(),
+                value: zeroize::Zeroizing::new("test-value-123".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
@@ -332,7 +332,7 @@ fn test_scan_diff_detects_secret_value_in_diff() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
-                value: "test-value-123".to_string(),
+                value: zeroize::Zeroizing::new("test-value-123".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
@@ -372,7 +372,7 @@ fn test_scan_diff_ignores_short_values() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "PIN".to_string(),
-                value: "1234567".to_string(),
+                value: zeroize::Zeroizing::new("1234567".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
@@ -392,7 +392,7 @@ fn test_scan_diff_clean_diff_exits_0() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
-                value: "test-value-123".to_string(),
+                value: zeroize::Zeroizing::new("test-value-123".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],
@@ -551,7 +551,7 @@ fn test_status_includes_session_expiry_and_stale_secret_summary() {
             name: "my-app".to_string(),
             secrets: vec![Secret {
                 key: "OPENAI_KEY".to_string(),
-                value: "test-value-123".to_string(),
+                value: zeroize::Zeroizing::new("test-value-123".to_string()),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             }],

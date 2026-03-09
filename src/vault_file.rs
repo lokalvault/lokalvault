@@ -3,7 +3,26 @@ use crate::settings::read_settings;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
+
+mod zeroizing_string_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S>(value: &Zeroizing<String>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.as_str().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Zeroizing::new(String::deserialize(deserializer)?))
+    }
+}
 
 // ── Binary file layout ──────────────────────────────────────────
 // Offset  Size  Field
@@ -22,7 +41,8 @@ const VERSION: u8 = 0x01;
 #[derive(Serialize, Deserialize, Debug, Clone, Zeroize)]
 pub struct Secret {
     pub key: String,
-    pub value: String,
+    #[serde(with = "zeroizing_string_serde")]
+    pub value: Zeroizing<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -202,13 +222,13 @@ mod tests {
             secrets: vec![
                 Secret {
                     key: "OPENAI_KEY".to_string(),
-                    value: "sk-test-1234".to_string(),
+                    value: zeroize::Zeroizing::new("sk-test-1234".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 },
                 Secret {
                     key: "STRIPE_SECRET".to_string(),
-                    value: "sk_live_5678".to_string(),
+                    value: zeroize::Zeroizing::new("sk_live_5678".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 },
@@ -222,7 +242,7 @@ mod tests {
         assert_eq!(loaded.projects[0].name, "my-saas-app");
         assert_eq!(loaded.projects[0].secrets.len(), 2);
         assert_eq!(loaded.projects[0].secrets[0].key, "OPENAI_KEY");
-        assert_eq!(loaded.projects[0].secrets[0].value, "sk-test-1234");
+        assert_eq!(loaded.projects[0].secrets[0].value.as_str(), "sk-test-1234");
 
         println!("✓ vault written and read back correctly");
         cleanup_test_dir("unit");

@@ -5,7 +5,7 @@ use crate::vault_file::{Project, Secret, VaultData, get_vault_path, read_vault, 
 use chrono::Utc;
 use std::fs;
 use std::path::Path;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSummary {
@@ -86,7 +86,7 @@ pub fn add_secret(
 
     project.secrets.push(Secret {
         key: key.to_string(),
-        value: value.to_string(),
+        value: Zeroizing::new(value.to_string()),
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
     });
@@ -109,7 +109,7 @@ pub fn update_secret(
         .find(|secret| secret.key == key)
         .ok_or_else(|| AppError::SecretNotFound(key.to_string()))?;
 
-    secret.value = value.to_string();
+    secret.value = Zeroizing::new(value.to_string());
     secret.updated_at = Utc::now().to_rfc3339();
     Ok(())
 }
@@ -265,7 +265,7 @@ mod tests {
                 name: "my-app".to_string(),
                 secrets: vec![Secret {
                     key: "OPENAI_KEY".to_string(),
-                    value: "test-value-123".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
@@ -399,7 +399,7 @@ mod tests {
         let mut vault = sample_vault();
         update_secret(&mut vault, "my-app", "OPENAI_KEY", "new-value").unwrap();
 
-        assert_eq!(vault.projects[0].secrets[0].value, "new-value");
+        assert_eq!(vault.projects[0].secrets[0].value.as_str(), "new-value");
     }
 
     #[test]
@@ -485,7 +485,10 @@ mod tests {
             if unlock_vault("old-password").is_err()
                 && let Ok(reloaded) = unlock_vault("new-password")
             {
-                assert_eq!(reloaded.projects[0].secrets[0].value, "test-value-123");
+                assert_eq!(
+                    reloaded.projects[0].secrets[0].value.as_str(),
+                    "test-value-123"
+                );
                 cleanup_test_dir("unit");
                 return;
             }

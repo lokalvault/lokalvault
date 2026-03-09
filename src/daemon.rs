@@ -356,7 +356,7 @@ pub fn fetch_all_secrets(
     Ok(project_data
         .secrets
         .iter()
-        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .map(|secret| (secret.key.clone(), secret.value.to_string()))
         .collect())
 }
 
@@ -387,7 +387,7 @@ pub fn upsert_secret(
                 .iter_mut()
                 .find(|entry| entry.key == key)
                 .ok_or_else(|| format!("secret not found: {key}"))?;
-            secret.value = value.to_string();
+            secret.value = Zeroizing::new(value.to_string());
         }
         Err(error) => return Err(error.to_string()),
     }
@@ -433,7 +433,7 @@ pub fn get_secret_value(state: &DaemonState, project: &str, key: &str) -> Result
         .iter()
         .find(|entry| entry.key == key)
         .ok_or_else(|| format!("secret not found: {key}"))?;
-    Ok(secret.value.clone())
+    Ok(secret.value.to_string())
 }
 
 pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>, String> {
@@ -459,7 +459,7 @@ pub fn get_all_project_secrets(
     Ok(project
         .secrets
         .iter()
-        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .map(|secret| (secret.key.clone(), secret.value.to_string()))
         .collect())
 }
 
@@ -468,8 +468,11 @@ pub fn scan_diff_for_project(
     project: &str,
     diff: &str,
 ) -> Result<Vec<String>, String> {
-    let secrets = get_all_project_secrets(state, project)?;
-    Ok(find_matching_secret_keys(diff, &secrets))
+    let matches = {
+        let secrets = get_all_project_secrets(state, project)?;
+        find_matching_secret_keys(diff, &secrets)
+    };
+    Ok(matches)
 }
 
 pub fn find_matching_secret_keys(diff: &str, secrets: &HashMap<String, String>) -> Vec<String> {
@@ -1148,7 +1151,7 @@ mod tests {
                 name: "my-app".to_string(),
                 secrets: vec![Secret {
                     key: "OPENAI_KEY".to_string(),
-                    value: "test-value-123".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
                     created_at: "2026-01-01T00:00:00Z".to_string(),
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
@@ -1322,7 +1325,7 @@ mod tests {
                 .iter()
                 .find(|s| s.key == "OPENAI_KEY")
                 .unwrap();
-            assert_eq!(secret.value, "test-value-123");
+            assert_eq!(secret.value.as_str(), "test-value-123");
         }
     }
 

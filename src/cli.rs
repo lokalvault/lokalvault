@@ -399,7 +399,7 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
         .iter()
         .find(|entry| entry.key == key)
         .ok_or_else(|| format!("secret not found: {key}"))?;
-    Ok(secret.value.clone())
+    Ok(secret.value.to_string())
 }
 
 pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
@@ -581,7 +581,7 @@ pub fn cmd_status() -> Result<String, String> {
                 }
                 let stale = count_stale_secret_keys(&recent, 30)?;
                 lines.push(format!(
-                    "Stale secrets (from audit history): {stale} secrets not accessed in 30+ days"
+                    "Stale secrets (based on available audit history): {stale} secrets not accessed in 30+ days"
                 ));
             }
             if dotenv_warning {
@@ -1090,7 +1090,7 @@ pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String
         let secrets = project_entry
             .secrets
             .iter()
-            .map(|secret| (secret.key.clone(), secret.value.clone()))
+            .map(|secret| (secret.key.clone(), secret.value.to_string()))
             .collect();
         find_matching_secret_keys(diff, &secrets)
     };
@@ -1173,7 +1173,7 @@ fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, Stri
     Ok(project_entry
         .secrets
         .iter()
-        .map(|secret| (secret.key.clone(), secret.value.clone()))
+        .map(|secret| (secret.key.clone(), secret.value.to_string()))
         .collect())
 }
 

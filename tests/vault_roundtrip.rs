@@ -46,7 +46,10 @@ fn test_full_vault_roundtrip() {
     let keys = list_secret_keys(&reopened, "my-app").unwrap();
 
     assert_eq!(reopened.projects.len(), 1);
-    assert_eq!(reopened.projects[0].secrets[0].value, "test-value-123");
+    assert_eq!(
+        reopened.projects[0].secrets[0].value.as_str(),
+        "test-value-123"
+    );
     assert_eq!(keys, vec!["OPENAI_KEY".to_string()]);
     cleanup();
 }
