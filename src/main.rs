@@ -303,7 +303,10 @@ async fn main() {
         Commands::Dev => match cli::cmd_dev() {
             Ok(detected) => {
                 let parts: Vec<String> = detected.split_whitespace().map(String::from).collect();
-                run_cmd::cmd_run_entry(None, parts, false).await.map(|_| ())
+                match run_cmd::cmd_run_entry(None, parts, false).await {
+                    Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         },
@@ -391,9 +394,10 @@ async fn main() {
             project,
             watch,
             command,
-        } => run_cmd::cmd_run_entry(project.as_deref(), command, watch)
-            .await
-            .map(|_| ()),
+        } => match run_cmd::cmd_run_entry(project.as_deref(), command, watch).await {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(e) => Err(e),
+        },
     };
 
     if let Err(error) = result {

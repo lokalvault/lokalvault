@@ -569,3 +569,36 @@ fn test_status_includes_session_expiry_and_stale_secret_summary() {
     assert!(effective.contains("Session expires in:"));
     assert!(effective.contains("Stale secrets: 1 secrets not accessed in 30+ days"));
 }
+
+#[test]
+fn test_run_passthrough_preserves_child_exit_code() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = fs::remove_file(".lokalvault");
+    fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
+
+    let socket = "/tmp/lokalvault-test.sock";
+    let _ = fs::remove_file(socket);
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("daemon-poc")
+        .spawn()
+        .unwrap();
+
+    for _ in 0..100 {
+        if std::path::Path::new(socket).exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["run", "--", "python3", "-c", "import sys; sys.exit(7)"])
+        .output()
+        .unwrap();
+
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = fs::remove_file(socket);
+    let _ = fs::remove_file(".lokalvault");
+
+    assert_eq!(output.status.code(), Some(7));
+}

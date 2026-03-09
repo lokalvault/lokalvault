@@ -138,6 +138,19 @@ Without this: any user on the machine can connect to the daemon.
 
 ---
 
+## RULE 8A — The socket is the source of truth for daemon liveness
+
+Do not introduce `daemon.lock` or any parallel lockfile-based lifecycle check.
+
+Correct behavior:
+- attempt to connect to the per-user socket
+- if connect succeeds, daemon is running
+- if the socket exists but connect returns `ECONNREFUSED`, treat it as stale and remove it
+
+The current `src/ipc_client.rs` implementation already follows this rule.
+
+---
+
 ## RULE 9 — Token comparison must be constant-time
 
 Never use `==` to compare tokens. This leaks timing information.

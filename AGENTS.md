@@ -63,6 +63,7 @@ Recommended flow for shared or security-sensitive changes:
 - Do not introduce crypto outside `src/crypto.rs`.
 - Do not log secret values, passwords, tokens, or clipboard contents.
 - Do not simplify two-phase token registration.
+- Do not add `daemon.lock`; the socket is the source of truth for daemon liveness.
 
 ## Deferred Work
 
