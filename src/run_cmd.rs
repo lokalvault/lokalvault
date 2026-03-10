@@ -221,7 +221,6 @@ async fn run_with_real_daemon(
     let secrets_response = send_ipc_request(serde_json::json!({
         "type": "get_all_secrets_for_run",
         "token": token,
-        "pid": 0,
     }))?;
     let secrets = secrets_response["secrets"]
         .as_object()
@@ -254,12 +253,10 @@ async fn run_with_real_daemon(
     }
     inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let pid = child.id();
 
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
         "token": token,
-        "pid": pid,
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(phase2["error"]
@@ -373,7 +370,6 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
     let secrets_response = send_ipc_request(serde_json::json!({
         "type": "get_all_secrets_for_run",
         "token": token,
-        "pid": 0,
     }))?;
     let secrets = secrets_response["secrets"]
         .as_object()
@@ -392,7 +388,6 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
         "token": token,
-        "pid": child.id(),
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(phase2["error"]

@@ -354,6 +354,30 @@ pub fn fetch_all_secrets_for_boundary(
     .map_err(FetchSecretsError::State)
 }
 
+pub fn fetch_all_secrets_for_pending_boundary(
+    state: &DaemonState,
+    token: &str,
+    uid: u32,
+) -> Result<HashMap<String, String>, FetchSecretsError> {
+    let project = match validate_pending_token(state, token, uid) {
+        TokenValidation::Valid(project) => project,
+        TokenValidation::InvalidToken => return Err(FetchSecretsError::InvalidToken),
+        TokenValidation::PidMismatch => return Err(FetchSecretsError::PidMismatch),
+        TokenValidation::UidMismatch => return Err(FetchSecretsError::UidMismatch),
+        TokenValidation::Expired => return Err(FetchSecretsError::Expired),
+    };
+
+    // Boundary conversion: these values are leaving daemon-owned memory for env injection.
+    with_project_ref(state, &project, |project_data| {
+        project_data
+            .secrets
+            .iter()
+            .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
+            .collect()
+    })
+    .map_err(FetchSecretsError::State)
+}
+
 pub fn upsert_secret(
     state: &DaemonState,
     project: &str,
@@ -572,6 +596,33 @@ pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> T
                 TokenValidation::Valid(record.project.clone())
             }
         }
+    }
+}
+
+pub fn validate_pending_token(state: &DaemonState, token: &str, uid: u32) -> TokenValidation {
+    let token_store = match state.token_store.lock() {
+        Ok(store) => store,
+        Err(_) => return TokenValidation::InvalidToken,
+    };
+
+    let Some((_, record)) = token_store
+        .iter()
+        .find(|(stored_token, _)| constant_time_compare(stored_token, token))
+    else {
+        return TokenValidation::InvalidToken;
+    };
+
+    if Instant::now() > record.deadline {
+        return TokenValidation::Expired;
+    }
+
+    if record.uid != uid {
+        return TokenValidation::UidMismatch;
+    }
+
+    match record.state {
+        TokenState::Pending => TokenValidation::Valid(record.project.clone()),
+        TokenState::Active => TokenValidation::PidMismatch,
     }
 }
 
@@ -804,7 +855,7 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
     }
 
     let request = read_json_request(stream).await.map_err(|e| e.message())?;
-    let response = handle_ipc_request(state, &request)?;
+    let response = handle_ipc_request(state, &request, peer_pid, uid)?;
 
     if let Ok(mut last) = state.last_activity.lock() {
         *last = Instant::now();
@@ -824,6 +875,8 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
 fn handle_ipc_request(
     state: &DaemonState,
     request: &serde_json::Value,
+    peer_pid: u32,
+    peer_uid: u32,
 ) -> Result<serde_json::Value, String> {
     let request_type = request
         .get("type")
@@ -969,8 +1022,7 @@ fn handle_ipc_request(
                 .get("project")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing project".to_string())?;
-            let uid = unsafe { libc::geteuid() };
-            register_token_phase1(state, token, uid, project)?;
+            register_token_phase1(state, token, peer_uid, project)?;
             json!({ "ok": true })
         }
         "register_token_phase2" => {
@@ -978,15 +1030,16 @@ fn handle_ipc_request(
                 .get("token")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing token".to_string())?;
-            let pid = request
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "missing pid".to_string())? as u32;
             let timeout_minutes = read_settings().session_timeout_minutes as u64;
-            register_token_phase2(state, token, pid, Duration::from_secs(timeout_minutes * 60))?;
+            register_token_phase2(
+                state,
+                token,
+                peer_pid,
+                Duration::from_secs(timeout_minutes * 60),
+            )?;
             monitor_child_pid(
                 state.clone(),
-                pid,
+                peer_pid,
                 token.to_string(),
                 Duration::from_millis(100),
             );
@@ -997,15 +1050,10 @@ fn handle_ipc_request(
                 .get("token")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing token".to_string())?;
-            let pid = request
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "missing pid".to_string())? as u32;
-            let uid = unsafe { libc::geteuid() };
             let project_name =
                 project_for_token(state, token).unwrap_or_else(|| "unknown".to_string());
-            let secrets =
-                fetch_all_secrets_for_boundary(state, token, pid, uid).map_err(|e| e.message())?;
+            let secrets = fetch_all_secrets_for_pending_boundary(state, token, peer_uid)
+                .map_err(|e| e.message())?;
             for key in secrets.keys() {
                 log_access_event(AccessEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1240,6 +1288,46 @@ mod tests {
 
         let validation = validate_token(&state, "token-1", 777, 999);
         assert_eq!(validation, TokenValidation::UidMismatch);
+    }
+
+    #[test]
+    fn test_validate_pending_token_accepts_matching_pending_token() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let validation = validate_pending_token(&state, "token-1", 501);
+        assert_eq!(validation, TokenValidation::Valid("my-app".to_string()));
+    }
+
+    #[test]
+    fn test_validate_pending_token_rejects_uid_mismatch() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let validation = validate_pending_token(&state, "token-1", 999);
+        assert_eq!(validation, TokenValidation::UidMismatch);
+    }
+
+    #[test]
+    fn test_validate_pending_token_rejects_active_token() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+        register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
+
+        let validation = validate_pending_token(&state, "token-1", 501);
+        assert_eq!(validation, TokenValidation::PidMismatch);
+    }
+
+    #[test]
+    fn test_fetch_all_secrets_for_pending_boundary_returns_project_map() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let secrets = fetch_all_secrets_for_pending_boundary(&state, "token-1", 501).unwrap();
+        assert_eq!(
+            secrets.get("OPENAI_KEY"),
+            Some(&"test-value-123".to_string())
+        );
     }
 
     #[test]

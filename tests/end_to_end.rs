@@ -333,6 +333,39 @@ fn test_ai_safe_generates_env_example() {
         .unwrap();
     assert!(output.status.success());
     assert!(tmp.join(".env.example").exists());
+    let agents = fs::read_to_string(tmp.join("AGENTS.md")).unwrap();
+    assert!(agents.starts_with("<!-- lokalvault-managed:agents -->\n"));
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_ai_safe_refuses_to_overwrite_foreign_agents_file() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+    let tmp = std::env::temp_dir().join("lokalvault-ai-safe-foreign-agents");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(
+        tmp.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = []\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.join("AGENTS.md"),
+        "# AI Agent Instructions\n\nThis project uses LokalVault for secrets management.\n\nCustom content not managed by LokalVault.\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["ai-safe", "--project", "my-app"])
+        .current_dir(&tmp)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to overwrite"));
+    let agents = fs::read_to_string(tmp.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("Custom content not managed by LokalVault."));
     cleanup_test_dir();
 }
 

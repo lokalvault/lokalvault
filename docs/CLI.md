@@ -141,6 +141,7 @@ lokalvault init --template stripe
 - Runtime socket IPC requests do not carry the master password.
 - Secret values become plain strings at unavoidable boundaries such as JSON IPC responses, child process environments, and the system clipboard.
 - `lokalvault push` may pass secret values through third-party CLI argument handling depending on the target platform CLI.
+- Daemon memory locking (`mlockall`) is best-effort; restricted environments may emit `Warning: memory locking unavailable ...` during daemon startup, but the daemon continues running.
 
 ## What Is Estimated vs Authoritative
 
