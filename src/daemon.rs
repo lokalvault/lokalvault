@@ -356,7 +356,7 @@ pub fn fetch_all_secrets(
     Ok(project_data
         .secrets
         .iter()
-        .map(|secret| (secret.key.clone(), secret.value.to_string()))
+        .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
         .collect())
 }
 
@@ -433,7 +433,7 @@ pub fn get_secret_value(state: &DaemonState, project: &str, key: &str) -> Result
         .iter()
         .find(|entry| entry.key == key)
         .ok_or_else(|| format!("secret not found: {key}"))?;
-    Ok(secret.value.to_string())
+    Ok(secret.value.as_str().to_owned())
 }
 
 pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>, String> {
@@ -459,7 +459,7 @@ pub fn get_all_project_secrets(
     Ok(project
         .secrets
         .iter()
-        .map(|secret| (secret.key.clone(), secret.value.to_string()))
+        .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
         .collect())
 }
 

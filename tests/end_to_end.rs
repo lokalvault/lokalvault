@@ -77,13 +77,20 @@ fn test_project_config_roundtrip_for_real_run_path() {
 #[test]
 fn test_run_without_project_or_config_errors_cleanly() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = fs::remove_file(".lokalvault");
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-run-no-config");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
     let _ = fs::remove_file("/tmp/lokalvault-test.sock");
 
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
         .args(["run", "--", "true"])
         .output()
         .unwrap();
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
 
     assert!(!output.status.success());
     assert!(

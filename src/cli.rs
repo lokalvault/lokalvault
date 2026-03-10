@@ -563,7 +563,7 @@ pub fn cmd_status() -> Result<String, String> {
                 let uptime_seconds = status["uptime_seconds"].as_u64().unwrap_or(0);
                 let remaining_minutes = timeout_minutes.saturating_sub(uptime_seconds / 60);
                 lines.push(format!(
-                    "Session expires in (estimate): {}h {}m",
+                    "Session expires in (estimated): {}h {}m",
                     remaining_minutes / 60,
                     remaining_minutes % 60
                 ));
