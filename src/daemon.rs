@@ -343,21 +343,14 @@ pub fn fetch_all_secrets(
         TokenValidation::Expired => return Err(FetchSecretsError::Expired),
     };
 
-    let vault = state
-        .vault
-        .lock()
-        .map_err(|e| FetchSecretsError::State(e.to_string()))?;
-    let project_data = vault
-        .projects
-        .iter()
-        .find(|entry| entry.name == project)
-        .ok_or_else(|| FetchSecretsError::ProjectNotFound(project.clone()))?;
-
-    Ok(project_data
-        .secrets
-        .iter()
-        .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
-        .collect())
+    with_project_ref(state, &project, |project_data| {
+        project_data
+            .secrets
+            .iter()
+            .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
+            .collect()
+    })
+    .map_err(FetchSecretsError::State)
 }
 
 pub fn upsert_secret(
@@ -422,18 +415,14 @@ pub fn project_count(state: &DaemonState) -> Result<usize, String> {
 }
 
 pub fn get_secret_value(state: &DaemonState, project: &str, key: &str) -> Result<String, String> {
-    let vault = state.vault.lock().map_err(|e| e.to_string())?;
-    let project = vault
-        .projects
-        .iter()
-        .find(|entry| entry.name == project)
-        .ok_or_else(|| format!("project not found: {project}"))?;
-    let secret = project
-        .secrets
-        .iter()
-        .find(|entry| entry.key == key)
-        .ok_or_else(|| format!("secret not found: {key}"))?;
-    Ok(secret.value.as_str().to_owned())
+    with_project_ref(state, project, |project_data| {
+        project_data
+            .secrets
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|secret| secret.value.as_str().to_owned())
+            .ok_or_else(|| format!("secret not found: {key}"))
+    })?
 }
 
 pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>, String> {
@@ -450,17 +439,13 @@ pub fn get_all_project_secrets(
     state: &DaemonState,
     project: &str,
 ) -> Result<HashMap<String, String>, String> {
-    let vault = state.vault.lock().map_err(|e| e.to_string())?;
-    let project = vault
-        .projects
-        .iter()
-        .find(|entry| entry.name == project)
-        .ok_or_else(|| format!("project not found: {project}"))?;
-    Ok(project
-        .secrets
-        .iter()
-        .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
-        .collect())
+    with_project_ref(state, project, |project_data| {
+        project_data
+            .secrets
+            .iter()
+            .map(|secret| (secret.key.clone(), secret.value.as_str().to_owned()))
+            .collect()
+    })
 }
 
 pub fn scan_diff_for_project(
@@ -469,10 +454,35 @@ pub fn scan_diff_for_project(
     diff: &str,
 ) -> Result<Vec<String>, String> {
     let matches = {
-        let secrets = get_all_project_secrets(state, project)?;
-        find_matching_secret_keys(diff, &secrets)
+        with_project_ref(state, project, |project_data| {
+            let mut matches = project_data
+                .secrets
+                .iter()
+                .filter(|secret| {
+                    let value = secret.value.as_str();
+                    !value.is_empty() && value.len() >= 8 && diff.contains(value)
+                })
+                .map(|secret| secret.key.clone())
+                .collect::<Vec<_>>();
+            matches.sort();
+            matches.dedup();
+            matches
+        })?
     };
     Ok(matches)
+}
+
+fn with_project_ref<T, F>(state: &DaemonState, project: &str, f: F) -> Result<T, String>
+where
+    F: FnOnce(&crate::vault_file::Project) -> T,
+{
+    let vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let project_data = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .ok_or_else(|| format!("project not found: {project}"))?;
+    Ok(f(project_data))
 }
 
 pub fn find_matching_secret_keys(diff: &str, secrets: &HashMap<String, String>) -> Vec<String> {

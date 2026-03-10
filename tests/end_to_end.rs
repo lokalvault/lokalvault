@@ -300,6 +300,7 @@ fn test_doctor_detects_missing_vault() {
 #[test]
 fn test_dev_fallback_error_no_detection() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
         .arg("dev")
         .current_dir(std::env::temp_dir())
@@ -307,6 +308,7 @@ fn test_dev_fallback_error_no_detection() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("Could not detect run command"));
+    cleanup_test_dir();
 }
 
 #[test]

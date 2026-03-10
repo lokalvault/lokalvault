@@ -26,5 +26,6 @@ pub(crate) mod test_utils {
     pub fn cleanup_test_dir(prefix: &str) {
         let dir = std::env::temp_dir().join(format!("lokalvault-{prefix}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
     }
 }
