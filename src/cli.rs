@@ -1360,6 +1360,9 @@ fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String
 
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!("daemon exited during startup with status {status}"));
+        }
         if get_socket_path().exists() {
             return Ok(());
         }

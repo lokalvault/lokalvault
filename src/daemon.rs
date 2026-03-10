@@ -190,8 +190,15 @@ async fn run_daemon_server_with_listener(
     let result: Result<(), String> = async {
         loop {
             let (mut stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-            if handle_connection(&state, &mut stream).await? {
-                break;
+            match handle_connection(&state, &mut stream).await {
+                Ok(should_shutdown) => {
+                    if should_shutdown {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Warning: daemon request failed: {error}");
+                }
             }
         }
         Ok(())
