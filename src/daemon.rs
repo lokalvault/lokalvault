@@ -329,7 +329,7 @@ pub fn register_token_phase2(
     Ok(())
 }
 
-pub fn fetch_all_secrets(
+pub fn fetch_all_secrets_for_boundary(
     state: &DaemonState,
     token: &str,
     pid: u32,
@@ -343,6 +343,7 @@ pub fn fetch_all_secrets(
         TokenValidation::Expired => return Err(FetchSecretsError::Expired),
     };
 
+    // Boundary conversion: these values are leaving daemon-owned memory for env injection.
     with_project_ref(state, &project, |project_data| {
         project_data
             .secrets
@@ -414,7 +415,12 @@ pub fn project_count(state: &DaemonState) -> Result<usize, String> {
     Ok(vault.projects.len())
 }
 
-pub fn get_secret_value(state: &DaemonState, project: &str, key: &str) -> Result<String, String> {
+pub fn get_secret_value_for_boundary(
+    state: &DaemonState,
+    project: &str,
+    key: &str,
+) -> Result<String, String> {
+    // Boundary conversion: this value is destined for an IPC response.
     with_project_ref(state, project, |project_data| {
         project_data
             .secrets
@@ -435,10 +441,11 @@ pub fn list_project_keys(state: &DaemonState, project: &str) -> Result<Vec<Strin
     list_secret_keys(&vault, project).map_err(|e| e.to_string())
 }
 
-pub fn get_all_project_secrets(
+pub fn get_all_project_secrets_for_boundary(
     state: &DaemonState,
     project: &str,
 ) -> Result<HashMap<String, String>, String> {
+    // Boundary conversion: callers use this map only when values leave daemon-owned memory.
     with_project_ref(state, project, |project_data| {
         project_data
             .secrets
@@ -833,7 +840,7 @@ fn handle_ipc_request(
                 .get("key")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing key".to_string())?;
-            let value = get_secret_value(state, project, key)?;
+            let value = get_secret_value_for_boundary(state, project, key)?;
             let process_name = request
                 .get("process_name")
                 .and_then(serde_json::Value::as_str)
@@ -910,7 +917,7 @@ fn handle_ipc_request(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("cli_export")
                 .to_string();
-            let secrets = get_all_project_secrets(state, project)?;
+            let secrets = get_all_project_secrets_for_boundary(state, project)?;
             for key in secrets.keys() {
                 log_access_event(AccessEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -997,7 +1004,8 @@ fn handle_ipc_request(
             let uid = unsafe { libc::geteuid() };
             let project_name =
                 project_for_token(state, token).unwrap_or_else(|| "unknown".to_string());
-            let secrets = fetch_all_secrets(state, token, pid, uid).map_err(|e| e.message())?;
+            let secrets =
+                fetch_all_secrets_for_boundary(state, token, pid, uid).map_err(|e| e.message())?;
             for key in secrets.keys() {
                 log_access_event(AccessEvent {
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -1240,7 +1248,7 @@ mod tests {
         register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
         register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
 
-        let secrets = fetch_all_secrets(&state, "token-1", 777, 501).unwrap();
+        let secrets = fetch_all_secrets_for_boundary(&state, "token-1", 777, 501).unwrap();
         assert_eq!(
             secrets.get("OPENAI_KEY"),
             Some(&"test-value-123".to_string())
@@ -1250,7 +1258,7 @@ mod tests {
     #[test]
     fn test_fetch_all_secrets_rejects_invalid_token() {
         let state = sample_daemon_state();
-        let error = fetch_all_secrets(&state, "missing-token", 777, 501).unwrap_err();
+        let error = fetch_all_secrets_for_boundary(&state, "missing-token", 777, 501).unwrap_err();
 
         assert_eq!(error.message(), "token invalid");
     }

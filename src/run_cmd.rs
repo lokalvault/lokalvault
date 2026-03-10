@@ -1,6 +1,6 @@
 use crate::crypto::generate_token;
 use crate::daemon::{
-    DaemonState, POC_SOCKET_PATH, fetch_all_secrets as fetch_all_secrets_from_state,
+    DaemonState, POC_SOCKET_PATH, fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
     register_token_phase1, register_token_phase2,
 };
 use crate::ipc_client::send_ipc_request;

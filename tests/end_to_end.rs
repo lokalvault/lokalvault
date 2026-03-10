@@ -1,7 +1,7 @@
 use lokalvault::audit_log::{clear_audit_log, read_audit_log};
 use lokalvault::cli::ProjectTemplate;
 use lokalvault::daemon::{
-    fetch_all_secrets, register_token_phase1, register_token_phase2, start_daemon,
+    fetch_all_secrets_for_boundary, register_token_phase1, register_token_phase2, start_daemon,
 };
 use lokalvault::ipc_client::{get_socket_path, send_ipc_request};
 use lokalvault::run_cmd::{fetch_all_secrets as run_fetch_all_secrets, get_project_from_config};
@@ -50,7 +50,7 @@ fn test_real_token_flow_across_run_and_daemon_modules() {
     register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
     register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
 
-    let daemon_secrets = fetch_all_secrets(&state, "token-1", 777, 501).unwrap();
+    let daemon_secrets = fetch_all_secrets_for_boundary(&state, "token-1", 777, 501).unwrap();
     let run_secrets = run_fetch_all_secrets(&state, "token-1", 777, 501).unwrap();
 
     assert_eq!(daemon_secrets, run_secrets);
@@ -77,6 +77,7 @@ fn test_project_config_roundtrip_for_real_run_path() {
 #[test]
 fn test_run_without_project_or_config_errors_cleanly() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let original_cwd = std::env::current_dir().unwrap();
     let temp = std::env::temp_dir().join("lokalvault-run-no-config");
     let _ = fs::remove_dir_all(&temp);
@@ -91,6 +92,7 @@ fn test_run_without_project_or_config_errors_cleanly() {
 
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&temp);
+    cleanup_test_dir();
 
     assert!(!output.status.success());
     assert!(
@@ -314,6 +316,7 @@ fn test_dev_fallback_error_no_detection() {
 #[test]
 fn test_ai_safe_generates_env_example() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
     let tmp = std::env::temp_dir().join("lokalvault-ai-safe-test");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
@@ -330,6 +333,7 @@ fn test_ai_safe_generates_env_example() {
         .unwrap();
     assert!(output.status.success());
     assert!(tmp.join(".env.example").exists());
+    cleanup_test_dir();
 }
 
 #[test]
