@@ -136,9 +136,9 @@ Offset  Size  Field
 | `validate_token` | Constant-time compare + PID + UID check | ⬜ Phase 1A |
 | `register_token_phase1` | Store pending token with 1000ms window | ⬜ Phase 1A |
 | `register_token_phase2` | Bind token to PID after spawn | ⬜ Phase 1A |
-| `monitor_child_pid` | Poll sysinfo, invalidate token on exit | ⬜ Phase 1A |
+| `monitor_child_pid` | Poll child liveness with `kill(pid, 0)`, invalidate token on exit | ⬜ Phase 1A |
 | `invalidate_token` | Remove from token_store | ⬜ Phase 1A |
-| `check_rate_limit` | Max 30 req/s per PID | ⬜ Phase 1A |
+| `check_rate_limit` | Max 60 requests per 60 seconds per PID | ⬜ Phase 1A |
 | `disable_core_dumps` | Best-effort, never crash on failure | ⬜ Phase 1A |
 | `lock_memory_pages` | Best-effort mlock, never crash on failure | ⬜ Phase 1A |
 

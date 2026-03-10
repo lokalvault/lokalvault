@@ -259,7 +259,10 @@ lokalvault run -- npm run dev
 19. Child process runs normally
 20. os.environ["OPENAI_KEY"] works (Mode 1)
 21. vault.get() also works if SDK installed (Mode 2)
-22. Daemon verifies all requests: token + PID + UID via SO_PEERCRED
+22. Daemon verifies requests with kernel-derived peer credentials.
+    Linux uses SO_PEERCRED for PID + UID. macOS currently treats UID as
+    authoritative and does not expose a reliable peer PID through the current
+    LOCAL_PEERCRED/getpeereid path.
 
 --- CLEANUP ---
 23. Child process exits
@@ -518,9 +521,9 @@ macOS:   setrlimit(RLIMIT_CORE, &rlim{0,0}) via libc crate
 Windows: SetErrorMode(SEM_NOGPFAULTERRORBOX) via windows-sys crate
 On failure: log "Warning: core dump protection unavailable" — DO NOT crash.
 
-**lock_memory_pages(data: *const u8, len: usize)** (best-effort)
-Linux/macOS: mlock(ptr, len) via region or memsec crate
-Windows:     VirtualLock(ptr, len) via windows-sys crate
+**lock_memory_pages()** (best-effort)
+Linux/macOS: mlockall(MCL_CURRENT) via libc crate
+Windows:     platform-specific hardening remains future work
 On failure: log "Warning: memory locking unavailable (containers?)" — DO NOT crash.
 
 **create_socket() → Result<()>**
