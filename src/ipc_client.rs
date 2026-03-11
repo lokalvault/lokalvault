@@ -9,15 +9,12 @@ pub fn get_socket_path() -> PathBuf {
 }
 
 pub fn is_daemon_running() -> bool {
-    match UnixStream::connect(get_socket_path()) {
-        Ok(_) => true,
-        Err(error) => {
-            if get_socket_path().exists() && is_connection_refused(&error) {
-                cleanup_stale_socket();
-            }
-            false
-        }
+    let socket_path = get_socket_path();
+    if !socket_path.exists() {
+        return false;
     }
+
+    UnixStream::connect(&socket_path).is_ok()
 }
 
 pub fn cleanup_stale_socket() {
