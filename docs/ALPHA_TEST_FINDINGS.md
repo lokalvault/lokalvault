@@ -10,97 +10,98 @@ Test binary:
 /Users/mohneeru/Developer/lokalvault/target/release/lokalvault
 ```
 
-Isolated test environment:
+## Executive Summary
+
+The latest manual macOS retest shows that LokalVault is now working for the core CLI developer workflow.
+
+Confirmed working in a real terminal session:
+
+- `create`
+- `unlock`
+- `status`
+- `doctor`
+- `init`
+- `add`
+- `get`
+- daemon-backed `run`
+- required-key enforcement in `run`
+- child environment injection in `run`
+- child exit-code passthrough in `run`
+- `copy`
+
+Known remaining issue:
+
+- `shell` exits immediately because it launches the user shell without interactive flags.
+
+Current release-readiness conclusion:
+
+- Ready for limited internal alpha / trusted human CLI testing
+- Not yet ready for broad public release without further polish
+
+## Historical Context
+
+Earlier manual testing on macOS exposed a daemon/session lifecycle bug where:
+
+- `unlock` reported success
+- the daemon process appeared briefly
+- the first real daemon-backed command could return `daemon returned empty response`
+- the daemon then stopped responding or disappeared
+
+Subsequent fixes addressed that instability:
+
+1. per-connection request errors no longer kill the full daemon session
+2. unlock startup detects early daemon exit more honestly
+3. daemon accept-loop handling was hardened
+4. daemon liveness probes were made non-destructive so routine status checks do not mutate socket state
+
+This document preserves the current validated state, not the earlier blocked state.
+
+## Latest Manual Test Environment
+
+Fresh retest root used for the successful validation pass:
 
 ```bash
-TEST_ROOT=/tmp/lokalvault-manual-real.uLrXpP
-LOKALVAULT_DATA_DIR=/tmp/lokalvault-manual-real.uLrXpP/data
+TEST_ROOT=/tmp/lokalvault-retest3.keN8fz
+LOKALVAULT_DATA_DIR=/tmp/lokalvault-retest3.keN8fz/data
+APP_DIR=/tmp/lokalvault-retest3.keN8fz/app
 ```
 
-## Summary
+## Latest Manual Test Log
 
-- Core prompt-driven flows work in a real terminal: `create`, `unlock`, `init`, `add`, and `get` all completed successfully.
-- A real-world blocker was found in daemon lifecycle stability on macOS:
-  - `unlock` can report success
-  - a `lokalvault daemon` process appears in `ps`
-  - the first real daemon-backed command can return `daemon returned empty response`
-  - the daemon is then no longer running
-- This makes the current build unsuitable for broader human alpha sharing until daemon request handling and run-path wiring are fixed.
-
-## Manual Test Log
-
-### 1. Isolated environment setup
+### 1. Clear any old session
 
 Command:
 
 ```bash
-TEST_ROOT="$(mktemp -d /tmp/lokalvault-manual-real.XXXXXX)" && export LOKALVAULT_DATA_DIR="$TEST_ROOT/data" && mkdir -p "$LOKALVAULT_DATA_DIR" "$TEST_ROOT/app" "$TEST_ROOT/repo" && echo "TEST_ROOT=$TEST_ROOT" && echo "LOKALVAULT_DATA_DIR=$LOKALVAULT_DATA_DIR"
+/Users/mohneeru/Developer/lokalvault/target/release/lokalvault lock || true
 ```
 
 Result:
 
 ```text
-TEST_ROOT=/tmp/lokalvault-manual-real.uLrXpP
-LOKALVAULT_DATA_DIR=/tmp/lokalvault-manual-real.uLrXpP/data
+Vault already locked.
 ```
 
 Assessment: PASS
 
-### 2. Release binary help
+### 2. Create fresh isolated retest root
 
 Command:
 
 ```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault --help | sed -n '1,20p'
+TEST_ROOT="$(mktemp -d /tmp/lokalvault-retest3.XXXXXX)" && export LOKALVAULT_DATA_DIR="$TEST_ROOT/data" && mkdir -p "$LOKALVAULT_DATA_DIR" "$TEST_ROOT/app" && echo "TEST_ROOT=$TEST_ROOT" && echo "LOKALVAULT_DATA_DIR=$LOKALVAULT_DATA_DIR"
 ```
 
 Result:
 
 ```text
-Usage: lokalvault <COMMAND>
-
-Commands:
-  daemon-poc
-  daemon
-  create
-  unlock
-  lock
-  init
-  add
-  update
-  delete
-  delete-project
-  list
-  get
-  import
-  export
-  diff
-  copy
-  shell
+TEST_ROOT=/tmp/lokalvault-retest3.keN8fz
+LOKALVAULT_DATA_DIR=/tmp/lokalvault-retest3.keN8fz/data
 ```
 
 Assessment: PASS
 
-### 3. Clean-machine baseline
-
-Command:
-
-```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault doctor
-```
-
-Result:
-
-```text
-✗ Vault file missing at /tmp/lokalvault-manual-real.uLrXpP/data/vault.lv
-✗ Daemon not running
-✗ .gitignore missing .env entry
-✗ .lokalvault config missing in current directory
-```
-
-Assessment: PASS
-
-### 4. Vault creation
+### 3. Create fresh vault
 
 Command:
 
@@ -108,55 +109,37 @@ Command:
 /Users/mohneeru/Developer/lokalvault/target/release/lokalvault create
 ```
 
-Observed first attempt:
+Result:
 
 ```text
 Master password:
-password rejected: password is too weak
+Vault created at /tmp/lokalvault-retest3.keN8fz/data/vault.lv
 ```
 
-Observed second attempt:
+Assessment: PASS
 
-```text
-Master password:
-Vault created at /tmp/lokalvault-manual-real.uLrXpP/data/vault.lv
-```
-
-Assessment: PASS with UX issue
-
-UX issue found:
-
-- weak password rejection works
-- the CLI does not explain why the password is weak
-- the CLI exits instead of keeping the user in an inline retry loop
-- recommended improvement: show the strength reason and reprompt immediately
-
-### 5. Unlock and daemon startup
+### 4. Unlock and immediately verify daemon health
 
 Command:
 
 ```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault unlock
+/Users/mohneeru/Developer/lokalvault/target/release/lokalvault unlock && echo '--- status ---' && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault status && echo '--- doctor ---' && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault doctor
 ```
 
-Observed first attempt:
-
-```text
-Master password:
-decryption failed — wrong password or tampered data
-```
-
-Observed second attempt:
+Result:
 
 ```text
 Master password:
 ✓ Vault unlocked. Session active.
-```
-
-Follow-up doctor:
-
-```text
-✓ Vault file exists at /tmp/lokalvault-manual-real.uLrXpP/data/vault.lv
+--- status ---
+LokalVault Status
+------------------------------
+Vault:    unlocked
+Projects: 0
+Session expires in (estimated): 8h 0m
+Version:  0.1.0
+--- doctor ---
+✓ Vault file exists at /tmp/lokalvault-retest3.keN8fz/data/vault.lv
 ✓ Daemon running
 ✗ .gitignore missing .env entry
 ✗ .lokalvault config missing in current directory
@@ -164,12 +147,12 @@ Follow-up doctor:
 
 Assessment: PASS
 
-### 6. Project initialization
+### 5. Initialize project config
 
 Command:
 
 ```bash
-cd /tmp/lokalvault-manual-real.uLrXpP/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault init my-app --template openai && echo '--- .lokalvault ---' && cat .lokalvault
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault init my-app --template openai && echo '--- .lokalvault ---' && cat .lokalvault
 ```
 
 Result:
@@ -190,213 +173,174 @@ optional = []
 
 Assessment: PASS
 
-### 7. Add secret
+### 6. Add required secrets
 
 Command:
 
 ```bash
-cd /tmp/lokalvault-manual-real.uLrXpP/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault add --project my-app OPENAI_API_KEY
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault add --project my-app OPENAI_API_KEY
 ```
 
 Result:
 
 ```text
 Secret value:
-Master password:
 ✓ Added OPENAI_API_KEY to my-app
 ```
 
 Assessment: PASS
 
-### 8. Get secret
-
 Command:
 
 ```bash
-cd /tmp/lokalvault-manual-real.uLrXpP/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault get my-app OPENAI_API_KEY
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault add --project my-app OPENAI_ORG_ID
 ```
 
 Result:
 
 ```text
-Master password:
+Secret value:
+✓ Added OPENAI_ORG_ID to my-app
+```
+
+Assessment: PASS
+
+### 7. Retrieve secret
+
+Command:
+
+```bash
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault get my-app OPENAI_API_KEY
+```
+
+Result:
+
+```text
 test-123%
 ```
 
 Assessment: PASS
 
-### 9. Run flow failure
+### 8. Run required-key enforcement check
+
+Before `OPENAI_ORG_ID` was added, the `run` path correctly blocked execution.
 
 Command:
 
 ```bash
-cd /tmp/lokalvault-manual-real.uLrXpP/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault run --project my-app -- python3 -c "import os; print(os.environ.get('OPENAI_API_KEY'))"
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault run --project my-app -- python3 -c "import os; print(os.environ.get('OPENAI_API_KEY'))"
+```
+
+Observed result before all required secrets were present:
+
+```text
+Missing required secrets for project my-app: OPENAI_ORG_ID
+```
+
+Assessment: PASS
+
+### 9. Run environment injection check
+
+Command:
+
+```bash
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault run --project my-app -- python3 -c "import os; print(os.environ.get('OPENAI_API_KEY'))"
+```
+
+Result after all required secrets were present:
+
+```text
+test-123
+```
+
+Assessment: PASS
+
+### 10. Run exit-code passthrough check
+
+Command:
+
+```bash
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault run --project my-app -- python3 -c "import sys; sys.exit(7)"; echo "EXIT_CODE=$?"
 ```
 
 Result:
 
 ```text
-vault is locked - run lokalvault unlock first
+EXIT_CODE=7
 ```
 
-Assessment: FAIL
+Assessment: PASS
 
-### 10. Session state after failed run
+### 11. Copy to clipboard
 
 Command:
 
 ```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault status && echo '---' && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault doctor
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault copy my-app OPENAI_API_KEY
 ```
 
-Result:
+Observed result:
 
-```text
-LokalVault Status
-------------------------------
-Vault:    locked
-Daemon:   stopped
-Version:  0.1.0
----
-✓ Vault file exists at /tmp/lokalvault-manual-real.uLrXpP/data/vault.lv
-✗ Daemon not running
-✗ .gitignore missing .env entry
-✓ .lokalvault config present in current directory
-```
+- clipboard contained `test-123`
+- paste verification succeeded
 
-Assessment: FAIL
+Assessment: PASS
 
-### 11. Re-unlock and immediate persistence failure
+### 12. Shell behavior
 
 Command:
 
 ```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault unlock && echo '--- immediate status ---' && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault status
+cd /tmp/lokalvault-retest3.keN8fz/app && /Users/mohneeru/Developer/lokalvault/target/release/lokalvault shell --project my-app
 ```
 
-Result:
+Observed result:
 
-```text
-Master password:
-✓ Vault unlocked. Session active.
---- immediate status ---
-daemon returned empty response
-```
+- shell returned immediately to the prompt
+- daemon remained healthy afterward
+- `status` still showed unlocked and `doctor` still showed daemon running
 
-Follow-up doctor:
+Assessment: FAIL (known bug)
 
-```text
-✓ Vault file exists at /tmp/lokalvault-manual-real.uLrXpP/data/vault.lv
-✗ Daemon not running
-✗ .gitignore missing .env entry
-✓ .lokalvault config present in current directory
-```
+## Current Known Issue
 
-Follow-up status:
+### `lokalvault shell` exits immediately
 
-```text
-LokalVault Status
-------------------------------
-Vault:    locked
-Daemon:   stopped
-Version:  0.1.0
-```
+Root cause from current code:
 
-Assessment: FAIL / blocker
+- `cmd_shell()` launches the shell binary directly with `Command::new(&shell).status()` in `src/cli.rs`
+- `shell_program()` only returns `$SHELL` or `/bin/sh` in `src/run_cmd.rs`
+- no interactive flags are passed (`-i`, `-l`, etc.)
 
-### 12. Process check after unlock
+This means `lokalvault shell` is currently launching the shell without explicitly requesting an interactive session.
 
-Command:
+## Current Alpha Readiness Decision
 
-```bash
-/Users/mohneeru/Developer/lokalvault/target/release/lokalvault unlock; echo '--- processes ---'; ps aux | grep lokalvault | grep -v grep
-```
+### Status
 
-Result excerpt:
-
-```text
-✓ Vault unlocked. Session active.
---- processes ---
-mohneeru ... /Users/mohneeru/Developer/lokalvault/target/release/lokalvault daemon
-```
-
-Assessment: daemon process exists briefly after unlock, but does not survive first real IPC request reliably.
-
-## Root Cause Notes From Code Review
-
-### 1. Daemon request errors currently terminate the whole daemon
-
-The main daemon accept loop exits if `handle_connection(...)` returns `Err`:
-
-- `src/daemon.rs:190-205`
-
-And `handle_connection()` has several fallible steps before writing a response:
-
-- peer credential fetch: `src/daemon.rs:828`
-- request read: `src/daemon.rs:857`
-- request handling: `src/daemon.rs:858`
-
-Client-side `daemon returned empty response` comes from receiving EOF/empty line instead of a JSON response:
-
-- `src/ipc_client.rs:35-51`
-
-This matches the manual repro:
-
-- unlock reports success
-- daemon process exists briefly
-- first real command can receive empty response
-- daemon then disappears
-
-### 2. Unlock success currently only waits for socket existence
-
-Unlock reports success once the socket path exists:
-
-- `src/cli.rs:1361-1366`
-
-This is weaker than a real health check and allows `unlock` to report success before the daemon has proven it can serve a real IPC request.
-
-### 3. Real-daemon run path is still partly miswired
-
-The real-daemon run path still injects the POC socket constant instead of the real per-user daemon socket:
-
-- `src/run_cmd.rs:254-255`
-- `src/run_cmd.rs:385-386`
-- `src/run_cmd.rs:294-307`
-- `src/daemon.rs:30`
-
-The real-daemon phase-2 token binding also uses the IPC peer PID instead of the spawned child PID:
-
-- caller omits child PID: `src/run_cmd.rs:257-260`, `src/run_cmd.rs:388-391`
-- daemon binds to `peer_pid`: `src/daemon.rs:1033-1039`
-
-On macOS, peer PID currently resolves to `0` in the implemented path:
-
-- `src/daemon.rs:773-805`
-- specifically `src/daemon.rs:804`
-
-This makes the current real-daemon run/token flow especially fragile on macOS.
-
-## Alpha Readiness Decision
-
-### Current status
-
-Not ready for broader human alpha sharing yet.
+Ready for limited internal alpha / trusted human CLI testing.
 
 ### Why
 
-The central workflow depends on:
+The core local developer workflow now works in real terminal use on macOS:
 
-- unlock
-- daemon stays alive
-- run / shell / session-based commands continue working
+- create vault
+- unlock session
+- inspect status/doctor
+- initialize project
+- add and retrieve secrets
+- run commands with injected secrets
+- preserve child exit codes
+- copy secrets to clipboard
 
-That session persistence guarantee failed in ordinary manual use on macOS.
+### Remaining caveats
+
+- `shell` needs an interactive-shell fix before broader sharing
+- another-machine validation is still recommended before wider rollout
+- broader beta packaging/distribution work is still separate
 
 ## Recommended Next Steps
 
-1. Fix daemon request error handling so one bad request cannot kill the daemon.
-2. Strengthen unlock startup verification with a real post-start health check, not just socket existence.
-3. Fix real-daemon run wiring:
-   - stop injecting `POC_SOCKET_PATH`
-   - bind tokens to the spawned child PID, not the launcher peer PID
-4. Re-run this exact manual test flow on macOS after the fix.
+1. Fix `lokalvault shell` to invoke the selected shell in interactive mode.
+2. Validate the current release binary on at least one additional Mac.
+3. Package the verified binary for trusted alpha testers.
