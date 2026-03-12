@@ -1,8 +1,8 @@
 use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::{
-    ProjectConfig, get_project_from_config, inject_secrets_into_env, read_project_config,
-    shell_program, write_project_config,
+    ProjectConfig, configure_interactive_shell, get_project_from_config, inject_secrets_into_env,
+    read_project_config, shell_program, write_project_config,
 };
 use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
@@ -618,6 +618,7 @@ pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
     let secrets = get_project_secret_map(&project)?;
     let shell = shell_program();
     let mut cmd = Command::new(&shell);
+    configure_interactive_shell(&mut cmd);
     inject_secrets_into_env(
         &mut cmd,
         &secrets,

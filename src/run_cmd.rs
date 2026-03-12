@@ -310,6 +310,10 @@ pub fn shell_program() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
+pub fn configure_interactive_shell(cmd: &mut Command) {
+    cmd.arg("-i");
+}
+
 pub fn fetch_all_secrets(
     state: &DaemonState,
     token: &str,
@@ -605,6 +609,18 @@ mod tests {
     fn test_shell_program_prefers_env_shell() {
         unsafe { std::env::set_var("SHELL", "/bin/zsh") };
         assert_eq!(shell_program(), "/bin/zsh");
+    }
+
+    #[test]
+    fn test_configure_interactive_shell_adds_interactive_flag() {
+        let mut cmd = Command::new("/bin/zsh");
+        configure_interactive_shell(&mut cmd);
+
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(args, vec!["-i".to_string()]);
     }
 
     #[test]
