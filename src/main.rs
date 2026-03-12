@@ -8,7 +8,10 @@ use std::io::Read;
 use zeroize::Zeroize;
 
 #[derive(Parser)]
-#[command(name = "lokalvault")]
+#[command(
+    name = "lokalvault",
+    about = "Developer CLI for local secret storage and runtime injection"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -27,18 +30,23 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(name = "daemon-poc")]
+    #[command(name = "daemon-poc", about = "Run the proof-of-concept daemon")]
     DaemonPoc,
-    #[command(name = "daemon")]
+    #[command(name = "daemon", about = "Run the detached background daemon")]
     Daemon,
+    #[command(about = "Create a new encrypted vault")]
     Create,
+    #[command(about = "Unlock the vault and start the daemon session")]
     Unlock,
+    #[command(about = "Lock the vault and stop the daemon session")]
     Lock,
+    #[command(about = "Create a .lokalvault project config")]
     Init {
         project_name: Option<String>,
         #[arg(long)]
         template: Option<String>,
     },
+    #[command(about = "Add a secret to a project")]
     Add {
         #[arg(long)]
         project: Option<String>,
@@ -47,51 +55,59 @@ enum Commands {
         #[arg(long)]
         clipboard: bool,
     },
+    #[command(about = "Update an existing secret")]
     Update {
         #[arg(long)]
         project: Option<String>,
         key: String,
         value: Option<String>,
     },
+    #[command(about = "Delete a secret from a project")]
     Delete {
         #[arg(long)]
         project: Option<String>,
         key: String,
     },
-    DeleteProject {
-        project: String,
-    },
-    List {
-        project: Option<String>,
-    },
+    #[command(about = "Delete an entire project and its secrets")]
+    DeleteProject { project: String },
+    #[command(about = "List projects or keys in a project")]
+    List { project: Option<String> },
+    #[command(about = "Print a secret value")]
     Get {
         project: Option<String>,
         key: String,
     },
+    #[command(about = "Import dotenv-style secrets into a project")]
     Import {
         path: String,
         #[arg(long)]
         project: String,
     },
+    #[command(about = "Export project secrets in a chosen format")]
     Export {
         project: Option<String>,
         #[arg(long)]
         format: String,
     },
+    #[command(about = "Compare a dotenv file against stored secrets")]
     Diff {
         path: String,
         #[arg(long)]
         project: Option<String>,
     },
+    #[command(about = "Copy a secret value to the clipboard")]
     Copy {
         project: Option<String>,
         key: String,
     },
+    #[command(about = "Open an interactive shell with project secrets injected")]
     Shell {
         #[arg(long)]
         project: Option<String>,
     },
+    #[command(about = "Show daemon/session status")]
     Status {},
+    #[command(about = "Read access audit history")]
     Audit {
         #[arg(long)]
         project: Option<String>,
@@ -102,40 +118,49 @@ enum Commands {
         #[arg(long)]
         process_name: Option<String>,
     },
+    #[command(about = "Clear the audit log")]
     AuditClear,
+    #[command(about = "Check local setup and repository hygiene")]
     Doctor,
+    #[command(about = "Detect and run the local dev command")]
     Dev,
+    #[command(about = "Set up AI-safe project guidance files")]
     AiSafe {
         #[arg(long)]
         project: Option<String>,
         #[arg(long)]
         generate_example: bool,
     },
+    #[command(about = "Create an encrypted share bundle for a project")]
     Share {
         project: String,
         #[arg(long)]
         output: Option<String>,
     },
+    #[command(about = "Import an encrypted share bundle")]
     Claim {
         file: String,
         #[arg(long)]
         project: Option<String>,
     },
+    #[command(about = "Install repository secret-scanning protections")]
     ProtectRepo {
         #[arg(long)]
         project: Option<String>,
     },
+    #[command(about = "Scan a diff for stored secret values")]
     ScanDiff {
         #[arg(long)]
         project: Option<String>,
     },
-    Completion {
-        shell: String,
-    },
+    #[command(about = "Generate shell completion scripts")]
+    Completion { shell: String },
+    #[command(about = "Read and write LokalVault settings")]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    #[command(about = "Push secrets to a third-party platform CLI")]
     Push {
         project: String,
         #[arg(long)]
@@ -143,6 +168,7 @@ enum Commands {
         #[arg(long)]
         env: Option<String>,
     },
+    #[command(about = "Run a command with project secrets injected")]
     Run {
         #[arg(long)]
         project: Option<String>,
@@ -155,8 +181,11 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
+    #[command(about = "Read one config value")]
     Get { key: String },
+    #[command(about = "Write one config value")]
     Set { key: String, value: String },
+    #[command(about = "List all config values")]
     List,
 }
 

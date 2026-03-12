@@ -311,6 +311,7 @@ pub fn shell_program() -> String {
 }
 
 pub fn configure_interactive_shell(cmd: &mut Command) {
+    cmd.arg("-l");
     cmd.arg("-i");
 }
 
@@ -620,7 +621,7 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(args, vec!["-i".to_string()]);
+        assert_eq!(args, vec!["-l".to_string(), "-i".to_string()]);
     }
 
     #[test]

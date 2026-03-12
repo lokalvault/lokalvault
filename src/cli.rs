@@ -21,7 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -619,6 +619,9 @@ pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
     let shell = shell_program();
     let mut cmd = Command::new(&shell);
     configure_interactive_shell(&mut cmd);
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     inject_secrets_into_env(
         &mut cmd,
         &secrets,
