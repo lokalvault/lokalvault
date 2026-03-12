@@ -31,7 +31,7 @@ Confirmed working in a real terminal session:
 
 Known remaining issue:
 
-- `shell` exits immediately because it launches the user shell without interactive flags.
+- `shell` still exits immediately on macOS even after one round of shell-launch fixes.
 
 Current release-readiness conclusion:
 
@@ -299,20 +299,21 @@ Observed result:
 - shell returned immediately to the prompt
 - daemon remained healthy afterward
 - `status` still showed unlocked and `doctor` still showed daemon running
+- later retest after the shell-launch patch still showed the same immediate exit behavior
 
 Assessment: FAIL (known bug)
 
 ## Current Known Issue
 
-### `lokalvault shell` exits immediately
+### `lokalvault shell` still exits immediately
 
 Root cause from current code:
 
-- `cmd_shell()` launches the shell binary directly with `Command::new(&shell).status()` in `src/cli.rs`
+- `cmd_shell()` now launches the selected shell with login + interactive flags and inherited stdio, but still relies on direct shell invocation through `Command::new(&shell).status()` in `src/cli.rs`
 - `shell_program()` only returns `$SHELL` or `/bin/sh` in `src/run_cmd.rs`
-- no interactive flags are passed (`-i`, `-l`, etc.)
+- in real macOS manual testing, that invocation model still returns immediately instead of holding an interactive shell session
 
-This means `lokalvault shell` is currently launching the shell without explicitly requesting an interactive session.
+This means the remaining shell issue is now a narrower shell-launch semantics problem, not a daemon/session problem.
 
 ## Current Alpha Readiness Decision
 
@@ -335,12 +336,12 @@ The core local developer workflow now works in real terminal use on macOS:
 
 ### Remaining caveats
 
-- `shell` needs an interactive-shell fix before broader sharing
+- `shell` remains broken on macOS and should be treated as a known convenience-command bug during early testing
 - another-machine validation is still recommended before wider rollout
 - broader beta packaging/distribution work is still separate
 
 ## Recommended Next Steps
 
-1. Fix `lokalvault shell` to invoke the selected shell in interactive mode.
-2. Validate the current release binary on at least one additional Mac.
-3. Package the verified binary for trusted alpha testers.
+1. Validate the current release binary on at least one additional Mac.
+2. Package the verified binary for trusted alpha testers.
+3. Revisit `shell` later with a shell-specific launch strategy if interactive shell sessions are required for broader adoption.
