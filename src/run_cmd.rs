@@ -1,6 +1,8 @@
 use crate::crypto::generate_token;
 use crate::daemon::{
-    DaemonState, POC_SOCKET_PATH, fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
+    DaemonState, POC_SOCKET_PATH,
+    fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
+    fetch_all_secrets_for_pending_boundary as fetch_all_secrets_pending,
     register_token_phase1, register_token_phase2,
 };
 use crate::ipc_client::send_ipc_request;
@@ -64,7 +66,7 @@ pub async fn cmd_run(
     let uid = unsafe { libc::geteuid() };
     register_token_phase1(state, &token, uid, &project_name)?;
 
-    let secrets = fetch_all_secrets(state, &token, 0, uid)?;
+    let secrets = fetch_all_secrets_pending_wrapper(state, &token, uid)?;
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
         cmd.args(&command[1..]);
@@ -322,6 +324,14 @@ pub fn fetch_all_secrets(
     uid: u32,
 ) -> Result<HashMap<String, String>, String> {
     fetch_all_secrets_from_state(state, token, pid, uid).map_err(|e| e.message())
+}
+
+pub fn fetch_all_secrets_pending_wrapper(
+    state: &DaemonState,
+    token: &str,
+    uid: u32,
+) -> Result<HashMap<String, String>, String> {
+    fetch_all_secrets_pending(state, token, uid).map_err(|e| e.message())
 }
 
 async fn cmd_run_poc_with_socket(
@@ -655,5 +665,29 @@ mod tests {
         let error = fetch_all_secrets(&state, "missing-token", 0, 501).unwrap_err();
 
         assert_eq!(error, "token invalid");
+    }
+
+    #[test]
+    fn test_fetch_all_secrets_pending_wrapper_works_before_phase2() {
+        let state = start_daemon(VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        });
+
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let secrets = fetch_all_secrets_pending_wrapper(&state, "token-1", 501).unwrap();
+        assert_eq!(
+            secrets.get("OPENAI_KEY"),
+            Some(&"test-value-123".to_string())
+        );
     }
 }
