@@ -77,6 +77,11 @@ impl Default for VaultData {
 // ── Vault path ──────────────────────────────────────────────────
 
 pub fn get_app_data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(override_dir) = crate::test_utils::get_test_data_dir() {
+        return override_dir;
+    }
+
     if let Ok(override_dir) = std::env::var("LOKALVAULT_DATA_DIR") {
         return PathBuf::from(override_dir);
     }

@@ -144,7 +144,7 @@ Offset  Size  Field
 
 **Socket paths:**
 - POC:     `/tmp/lokalvault-test.sock`
-- Prod:    `/tmp/lokalvault-{UID}.sock` (Linux/macOS)
+- Prod:    `std::env::temp_dir()/lokalvault-{UID}.sock` (Linux/macOS)
 - Windows: `\\.\pipe\lokalvault-{username_hash}`
 
 **CRITICAL platform note:**

@@ -31,6 +31,38 @@ fn cleanup_test_dir() {
     unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
 }
 
+fn wait_for_socket(socket: &std::path::Path) {
+    for _ in 0..50 {
+        if socket.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("daemon socket did not appear: {}", socket.display());
+}
+
+fn spawn_real_daemon(vault: VaultData, password: &str) -> std::process::Child {
+    let socket = get_socket_path();
+    let _ = fs::remove_file(&socket);
+
+    let input = serde_json::to_vec(&(vault, password.to_string())).unwrap();
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .arg("daemon")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    daemon.stdin.take().unwrap().write_all(&input).unwrap();
+
+    wait_for_socket(&socket);
+    daemon
+}
+
+fn shutdown_real_daemon(mut daemon: std::process::Child) {
+    let _ = send_ipc_request(json!({ "type": "shutdown" }));
+    let _ = daemon.wait();
+    let _ = fs::remove_file(get_socket_path());
+}
+
 #[test]
 fn test_real_token_flow_across_run_and_daemon_modules() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -152,23 +184,7 @@ fn test_run_with_project_config_uses_project_automatically() {
 fn test_ipc_full_lifecycle() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     setup_test_dir();
-    let socket = get_socket_path();
-    let _ = fs::remove_file(&socket);
-
-    let input = serde_json::to_vec(&(VaultData::new(), "password".to_string())).unwrap();
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .arg("daemon")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    daemon.stdin.take().unwrap().write_all(&input).unwrap();
-
-    for _ in 0..50 {
-        if socket.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    let mut daemon = spawn_real_daemon(VaultData::new(), "password");
 
     let add = send_ipc_request(json!({
         "type": "add_secret",
@@ -209,9 +225,6 @@ fn test_audit_log_records_daemon_access() {
     setup_test_dir();
     clear_audit_log().unwrap();
 
-    let socket = get_socket_path();
-    let _ = fs::remove_file(&socket);
-
     let vault = VaultData {
         version: 1,
         projects: vec![Project {
@@ -224,20 +237,7 @@ fn test_audit_log_records_daemon_access() {
             }],
         }],
     };
-    let input = serde_json::to_vec(&(vault, "password".to_string())).unwrap();
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .arg("daemon")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    daemon.stdin.take().unwrap().write_all(&input).unwrap();
-
-    for _ in 0..50 {
-        if socket.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    let daemon = spawn_real_daemon(vault, "password");
 
     let response = send_ipc_request(json!({
         "type": "get_secret",
@@ -258,9 +258,7 @@ fn test_audit_log_records_daemon_access() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("test-value-123"));
 
-    let shutdown = send_ipc_request(json!({ "type": "shutdown" })).unwrap();
-    assert_eq!(shutdown["ok"], true);
-    let _ = daemon.wait();
+    shutdown_real_daemon(daemon);
     cleanup_test_dir();
 }
 
@@ -557,13 +555,21 @@ fn test_init_with_template_writes_required_keys() {
 fn test_diff_dotenv_redacts_values() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = setup_test_dir();
-
-    lokalvault::vault_ops::create_vault("test-Strong-password-42!").unwrap();
-    let mut vault = lokalvault::vault_ops::unlock_vault("test-Strong-password-42!").unwrap();
-    lokalvault::vault_ops::add_project(&mut vault, "my-app").unwrap();
-    lokalvault::vault_ops::add_secret(&mut vault, "my-app", "OPENAI_KEY", "sk-secret-value")
-        .unwrap();
-    lokalvault::vault_file::write_vault(&vault, "test-Strong-password-42!").unwrap();
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("sk-secret-value".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        },
+        "test-Strong-password-42!",
+    );
 
     let env_path = dir.join("test.env");
     fs::write(
@@ -586,6 +592,7 @@ fn test_diff_dotenv_redacts_values() {
         diff.contains("<value differs>") || diff.contains("<value present>"),
         "diff should use redacted markers"
     );
+    shutdown_real_daemon(daemon);
     cleanup_test_dir();
 }
 

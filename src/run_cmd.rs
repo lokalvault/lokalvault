@@ -14,10 +14,15 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
+
+#[cfg(test)]
+static TEST_SHELL_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectSection {
@@ -322,6 +327,16 @@ pub fn inject_secrets_into_env(
 }
 
 pub fn shell_program() -> String {
+    #[cfg(test)]
+    if let Some(shell) = TEST_SHELL_PROGRAM
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return shell;
+    }
+
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
@@ -638,8 +653,15 @@ mod tests {
 
     #[test]
     fn test_shell_program_prefers_env_shell() {
-        unsafe { std::env::set_var("SHELL", "/bin/zsh") };
+        *TEST_SHELL_PROGRAM
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some("/bin/zsh".to_string());
         assert_eq!(shell_program(), "/bin/zsh");
+        *TEST_SHELL_PROGRAM
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]
