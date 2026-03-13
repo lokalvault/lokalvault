@@ -582,7 +582,10 @@ pub fn update_secret_in_state(
 pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> TokenValidation {
     let token_store = match state.token_store.lock() {
         Ok(store) => store,
-        Err(_) => return TokenValidation::InvalidToken,
+        Err(e) => {
+            eprintln!("CRITICAL: token_store mutex poisoned — a previous thread panicked: {e}");
+            return TokenValidation::InvalidToken;
+        }
     };
 
     let Some((_, record)) = token_store
@@ -615,7 +618,10 @@ pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> T
 pub fn validate_pending_token(state: &DaemonState, token: &str, uid: u32) -> TokenValidation {
     let token_store = match state.token_store.lock() {
         Ok(store) => store,
-        Err(_) => return TokenValidation::InvalidToken,
+        Err(e) => {
+            eprintln!("CRITICAL: token_store mutex poisoned — a previous thread panicked: {e}");
+            return TokenValidation::InvalidToken;
+        }
     };
 
     let Some((_, record)) = token_store
