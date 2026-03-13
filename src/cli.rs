@@ -629,11 +629,21 @@ pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
         &project,
         &get_socket_path().display().to_string(),
     );
-    let status = cmd.status().map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err(format!("shell exited with status {status}"));
+
+    #[cfg(unix)]
+    {
+        let err = cmd.exec();
+        Err(format!("failed to launch shell: {err}"))
     }
-    Ok(format!("✓ Exited shell for {project}"))
+
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status().map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("shell exited with status {status}"));
+        }
+        Ok(format!("✓ Exited shell for {project}"))
+    }
 }
 
 pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, String> {
