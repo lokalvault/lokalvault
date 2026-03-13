@@ -1448,9 +1448,9 @@ fn ensure_ai_safe_gitignore() -> Result<(), String> {
 fn write_lve_file(path: &Path, password: &str, payload: &serde_json::Value) -> Result<(), String> {
     let salt = crate::crypto::generate_salt();
     let nonce = crate::crypto::generate_nonce();
-    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1)?;
     let plaintext = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
-    let ciphertext = crate::crypto::encrypt(&plaintext, &key, &nonce);
+    let ciphertext = crate::crypto::encrypt(&plaintext, &key, &nonce)?;
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"LVSE");
@@ -1466,10 +1466,14 @@ fn read_lve_file(path: &Path, password: &str) -> Result<serde_json::Value, Strin
     if bytes.len() < 49 || &bytes[0..4] != b"LVSE" || bytes[4] != 0x01 {
         return Err("invalid .lve file".to_string());
     }
-    let salt: [u8; 32] = bytes[5..37].try_into().unwrap();
-    let nonce: [u8; 12] = bytes[37..49].try_into().unwrap();
+    let salt: [u8; 32] = bytes[5..37]
+        .try_into()
+        .map_err(|_| "invalid .lve file: corrupted salt".to_string())?;
+    let nonce: [u8; 12] = bytes[37..49]
+        .try_into()
+        .map_err(|_| "invalid .lve file: corrupted nonce".to_string())?;
     let ciphertext = &bytes[49..];
-    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1)?;
     let plaintext = crate::crypto::decrypt(ciphertext, &key, &nonce)?;
     serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
 }

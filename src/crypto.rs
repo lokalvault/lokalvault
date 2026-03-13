@@ -20,7 +20,7 @@ pub fn generate_nonce() -> [u8; 12] {
     nonce
 }
 
-pub fn derive_key(password: &str, salt: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+pub fn derive_key(password: &str, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, String> {
     derive_key_with_params(password, salt, 65_536, 3, 1)
 }
 
@@ -30,17 +30,18 @@ pub fn derive_key_with_params(
     memory_kb: u32,
     iterations: u32,
     parallelism: u32,
-) -> Zeroizing<[u8; 32]> {
-    let params = Params::new(memory_kb, iterations, parallelism, Some(32)).unwrap();
+) -> Result<Zeroizing<[u8; 32]>, String> {
+    let params = Params::new(memory_kb, iterations, parallelism, Some(32))
+        .map_err(|e| format!("invalid Argon2 params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; 32]);
     argon2
         .hash_password_into(password.as_bytes(), salt, key.as_mut())
-        .unwrap();
-    key
+        .map_err(|e| format!("key derivation failed: {e}"))?;
+    Ok(key)
 }
 
-pub fn benchmark_argon2() -> (u32, u32, u32) {
+pub fn benchmark_argon2() -> Result<(u32, u32, u32), String> {
     let salt = [7u8; 32];
     let password = "benchmark-password";
     let iterations = 3;
@@ -49,21 +50,21 @@ pub fn benchmark_argon2() -> (u32, u32, u32) {
 
     loop {
         let start = Instant::now();
-        let _ = derive_key_with_params(password, &salt, memory_kb, iterations, parallelism);
+        let _ = derive_key_with_params(password, &salt, memory_kb, iterations, parallelism)?;
         if start.elapsed().as_millis() >= 300 || memory_kb >= 1_048_576 {
             break;
         }
         memory_kb = (memory_kb * 2).min(1_048_576);
     }
 
-    (memory_kb, iterations, parallelism)
+    Ok((memory_kb, iterations, parallelism))
 }
 
-pub fn encrypt(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
+pub fn encrypt(plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     cipher
         .encrypt(Nonce::from_slice(nonce), plaintext)
-        .expect("encryption failed")
+        .map_err(|e| format!("encryption failed: {e}"))
 }
 
 pub fn decrypt(ciphertext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
@@ -124,9 +125,9 @@ mod tests {
 
         let salt = generate_salt();
         let nonce = generate_nonce();
-        let key = derive_key(password, &salt);
+        let key = derive_key(password, &salt).unwrap();
 
-        let ciphertext = encrypt(plaintext, &key, &nonce);
+        let ciphertext = encrypt(plaintext, &key, &nonce).unwrap();
         let decrypted = decrypt(&ciphertext, &key, &nonce).unwrap();
 
         assert_eq!(plaintext.to_vec(), decrypted);
@@ -137,10 +138,10 @@ mod tests {
     fn test_wrong_password_fails() {
         let salt = generate_salt();
         let nonce = generate_nonce();
-        let key1 = derive_key("correct-password", &salt);
-        let key2 = derive_key("wrong-password", &salt);
+        let key1 = derive_key("correct-password", &salt).unwrap();
+        let key2 = derive_key("wrong-password", &salt).unwrap();
 
-        let ciphertext = encrypt(b"secret", &key1, &nonce);
+        let ciphertext = encrypt(b"secret", &key1, &nonce).unwrap();
         let result = decrypt(&ciphertext, &key2, &nonce);
 
         assert!(result.is_err());
@@ -151,9 +152,9 @@ mod tests {
     fn test_tampered_ciphertext_fails() {
         let salt = generate_salt();
         let nonce = generate_nonce();
-        let key = derive_key("password", &salt);
+        let key = derive_key("password", &salt).unwrap();
 
-        let mut ciphertext = encrypt(b"secret", &key, &nonce);
+        let mut ciphertext = encrypt(b"secret", &key, &nonce).unwrap();
         ciphertext[0] ^= 0xFF; // flip a byte
 
         let result = decrypt(&ciphertext, &key, &nonce);
@@ -177,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_returns_values_within_bounds() {
-        let (memory_kb, iterations, parallelism) = benchmark_argon2();
+        let (memory_kb, iterations, parallelism) = benchmark_argon2().unwrap();
         assert!((65_536..=1_048_576).contains(&memory_kb));
         assert!(iterations >= 3);
         assert!(parallelism >= 1);
@@ -187,8 +188,8 @@ mod tests {
     fn test_derive_key_with_params_roundtrip() {
         let salt = generate_salt();
         let nonce = generate_nonce();
-        let key = derive_key_with_params("password", &salt, 65_536, 3, 1);
-        let ciphertext = encrypt(b"secret", &key, &nonce);
+        let key = derive_key_with_params("password", &salt, 65_536, 3, 1).unwrap();
+        let ciphertext = encrypt(b"secret", &key, &nonce).unwrap();
         let decrypted = decrypt(&ciphertext, &key, &nonce).unwrap();
         assert_eq!(decrypted, b"secret");
     }
