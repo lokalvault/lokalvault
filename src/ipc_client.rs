@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 pub fn get_socket_path() -> PathBuf {
     let uid = unsafe { libc::geteuid() };
-    PathBuf::from(format!("/tmp/lokalvault-{uid}.sock"))
+    std::env::temp_dir().join(format!("lokalvault-{uid}.sock"))
 }
 
 pub fn is_daemon_running() -> bool {

@@ -294,7 +294,7 @@ pub fn create_socket_at_path(socket_path: PathBuf) -> Result<(PathBuf, UnixListe
 
 pub fn unique_poc_socket_path(test_name: &str) -> PathBuf {
     let pid = std::process::id();
-    PathBuf::from(format!("/tmp/lokalvault-{test_name}-{pid}.sock"))
+    std::env::temp_dir().join(format!("lokalvault-{test_name}-{pid}.sock"))
 }
 
 pub fn register_token_phase1(
