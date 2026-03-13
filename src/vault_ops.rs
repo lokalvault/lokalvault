@@ -315,9 +315,24 @@ mod tests {
     #[test]
     fn test_lock_vault_clears_in_memory_values() {
         let mut vault = sample_vault();
+        assert!(!vault.projects.is_empty(), "precondition: vault has projects");
+        assert!(
+            !vault.projects[0].secrets.is_empty(),
+            "precondition: project has secrets"
+        );
+        assert_ne!(
+            vault.projects[0].secrets[0].value.as_str(),
+            "",
+            "precondition: secret value is non-empty"
+        );
+
         lock_vault(&mut vault);
 
-        assert!(vault.projects.is_empty());
+        assert!(
+            vault.projects.is_empty(),
+            "lock_vault should zeroize all project data from memory"
+        );
+        assert_eq!(vault.version, 0, "lock_vault should zeroize version field");
     }
 
     #[test]

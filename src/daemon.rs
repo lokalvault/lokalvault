@@ -1443,8 +1443,17 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_uses_clone_mutate_persist_swap_pattern() {
+    fn test_upsert_adds_secret_and_updates_in_memory_state() {
         let state = sample_daemon_state();
+
+        {
+            let vault = state.vault.lock().unwrap();
+            assert_eq!(vault.projects[0].secrets.len(), 1);
+            assert_eq!(vault.projects[0].secrets[0].key, "OPENAI_KEY");
+            assert_eq!(vault.projects[0].secrets[0].value.as_str(), "test-value-123");
+        }
+
+        upsert_secret(&state, "my-app", "OPENAI_KEY", "updated-value").unwrap();
 
         {
             let vault = state.vault.lock().unwrap();
@@ -1453,7 +1462,28 @@ mod tests {
                 .iter()
                 .find(|s| s.key == "OPENAI_KEY")
                 .unwrap();
-            assert_eq!(secret.value.as_str(), "test-value-123");
+            assert_eq!(
+                secret.value.as_str(),
+                "updated-value",
+                "upsert should update existing secret in daemon-owned vault state"
+            );
+        }
+
+        upsert_secret(&state, "my-app", "NEW_KEY", "new-value").unwrap();
+
+        {
+            let vault = state.vault.lock().unwrap();
+            assert_eq!(
+                vault.projects[0].secrets.len(),
+                2,
+                "upsert should add a new secret to the project"
+            );
+            let new_secret = vault.projects[0]
+                .secrets
+                .iter()
+                .find(|s| s.key == "NEW_KEY")
+                .unwrap();
+            assert_eq!(new_secret.value.as_str(), "new-value");
         }
     }
 

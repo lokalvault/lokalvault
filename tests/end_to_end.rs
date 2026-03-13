@@ -556,15 +556,32 @@ fn test_init_with_template_writes_required_keys() {
 #[test]
 fn test_diff_dotenv_redacts_values() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
-    let diff = lokalvault::cli::cmd_diff(
-        std::path::Path::new("/tmp/does-not-need-to-exist.env"),
-        Some("my-app"),
-    )
-    .unwrap_or_else(|_| "+ NEW_KEY=<value present>\n~ OPENAI_KEY=<value differs>".to_string());
+    let dir = setup_test_dir();
 
-    assert!(!diff.contains("local-secret"));
-    assert!(diff.contains("<value present>") || diff.contains("<value differs>"));
+    lokalvault::vault_ops::create_vault("test-Strong-password-42!").unwrap();
+    let mut vault = lokalvault::vault_ops::unlock_vault("test-Strong-password-42!").unwrap();
+    lokalvault::vault_ops::add_project(&mut vault, "my-app").unwrap();
+    lokalvault::vault_ops::add_secret(&mut vault, "my-app", "OPENAI_KEY", "sk-secret-value")
+        .unwrap();
+    lokalvault::vault_file::write_vault(&vault, "test-Strong-password-42!").unwrap();
+
+    let env_path = dir.join("test.env");
+    fs::write(&env_path, "OPENAI_KEY=different-value\nNEW_KEY=added-value\n").unwrap();
+
+    let diff = lokalvault::cli::cmd_diff(&env_path, Some("my-app")).unwrap();
+
+    assert!(
+        !diff.contains("sk-secret-value"),
+        "diff must never print vault secret values"
+    );
+    assert!(
+        !diff.contains("different-value"),
+        "diff must never print dotenv file values"
+    );
+    assert!(
+        diff.contains("<value differs>") || diff.contains("<value present>"),
+        "diff should use redacted markers"
+    );
     cleanup_test_dir();
 }
 
