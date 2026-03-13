@@ -665,7 +665,7 @@ pub fn check_rate_limit(state: &DaemonState, pid: u32) -> Result<(), String> {
             .map(|t| {
                 let elapsed = now.duration_since(t);
                 let remaining = RATE_LIMIT_WINDOW.saturating_sub(elapsed);
-                (remaining.as_millis() as u64).max(100).min(5000)
+                (remaining.as_millis() as u64).clamp(100, 5000)
             })
             .unwrap_or(1000);
         return Err(format!("rate limit exceeded — retry after {backoff_ms}ms"));
@@ -1456,7 +1456,10 @@ mod tests {
             let vault = state.vault.lock().unwrap();
             assert_eq!(vault.projects[0].secrets.len(), 1);
             assert_eq!(vault.projects[0].secrets[0].key, "OPENAI_KEY");
-            assert_eq!(vault.projects[0].secrets[0].value.as_str(), "test-value-123");
+            assert_eq!(
+                vault.projects[0].secrets[0].value.as_str(),
+                "test-value-123"
+            );
         }
 
         upsert_secret(&state, "my-app", "OPENAI_KEY", "updated-value").unwrap();

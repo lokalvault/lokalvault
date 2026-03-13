@@ -26,8 +26,8 @@ pub fn create_vault(password: &str) -> Result<(), AppError> {
         ));
     }
 
-    let (memory_kb, iterations, parallelism) = benchmark_argon2()
-        .map_err(|e| AppError::CryptoError(e))?;
+    let (memory_kb, iterations, parallelism) =
+        benchmark_argon2().map_err(AppError::CryptoError)?;
     let mut settings = read_settings();
     settings.argon2_memory_kb = memory_kb;
     settings.argon2_iterations = iterations;
@@ -315,7 +315,10 @@ mod tests {
     #[test]
     fn test_lock_vault_clears_in_memory_values() {
         let mut vault = sample_vault();
-        assert!(!vault.projects.is_empty(), "precondition: vault has projects");
+        assert!(
+            !vault.projects.is_empty(),
+            "precondition: vault has projects"
+        );
         assert!(
             !vault.projects[0].secrets.is_empty(),
             "precondition: project has secrets"
