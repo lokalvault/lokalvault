@@ -72,7 +72,8 @@ pub async fn cmd_run(
         cmd.args(&command[1..]);
     }
 
-    inject_secrets_into_env(&mut cmd, &secrets, &token, &project_name, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(&mut cmd, &secrets, &token, &project_name, &socket_path.display().to_string());
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let child_pid = child.id();
 
@@ -253,7 +254,8 @@ async fn run_with_real_daemon(
     if command.len() > 1 {
         cmd.args(&command[1..]);
     }
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(&mut cmd, &secrets, &token, project, &socket_path.display().to_string());
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({
@@ -397,7 +399,8 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
     if command.len() > 1 {
         cmd.args(&command[1..]);
     }
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(&mut cmd, &secrets, &token, project, &socket_path.display().to_string());
     let child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({
