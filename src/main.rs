@@ -197,9 +197,19 @@ async fn main() {
         Commands::DaemonPoc => daemon::run_daemon_poc().await.map(|_| ()),
         Commands::Daemon => {
             let mut input = Vec::new();
-            std::io::stdin().read_to_end(&mut input).unwrap();
+            if let Err(e) = std::io::stdin().read_to_end(&mut input) {
+                eprintln!("daemon: failed to read bootstrap data from stdin: {e}");
+                std::process::exit(1);
+            }
             let (vault, password): (lokalvault::vault_file::VaultData, String) =
-                serde_json::from_slice(&input).unwrap();
+                match serde_json::from_slice(&input) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        input.zeroize();
+                        eprintln!("daemon: failed to parse bootstrap data: {e}");
+                        std::process::exit(1);
+                    }
+                };
             input.zeroize();
             daemon::run_daemon_server(vault, password).await.map(|_| ())
         }
