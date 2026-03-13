@@ -26,8 +26,7 @@ pub fn create_vault(password: &str) -> Result<(), AppError> {
         ));
     }
 
-    let (memory_kb, iterations, parallelism) =
-        benchmark_argon2().map_err(AppError::CryptoError)?;
+    let (memory_kb, iterations, parallelism) = benchmark_argon2().map_err(AppError::CryptoError)?;
     let mut settings = read_settings();
     settings.argon2_memory_kb = memory_kb;
     settings.argon2_iterations = iterations;

@@ -1,9 +1,8 @@
 use crate::crypto::generate_token;
 use crate::daemon::{
-    DaemonState, POC_SOCKET_PATH,
-    fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
-    fetch_all_secrets_for_pending_boundary as fetch_all_secrets_pending,
-    register_token_phase1, register_token_phase2,
+    DaemonState, POC_SOCKET_PATH, fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
+    fetch_all_secrets_for_pending_boundary as fetch_all_secrets_pending, register_token_phase1,
+    register_token_phase2,
 };
 use crate::ipc_client::send_ipc_request;
 use crate::settings::read_settings;
@@ -73,7 +72,13 @@ pub async fn cmd_run(
     }
 
     let socket_path = crate::ipc_client::get_socket_path();
-    inject_secrets_into_env(&mut cmd, &secrets, &token, &project_name, &socket_path.display().to_string());
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        &project_name,
+        &socket_path.display().to_string(),
+    );
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let child_pid = child.id();
 
@@ -255,7 +260,13 @@ async fn run_with_real_daemon(
         cmd.args(&command[1..]);
     }
     let socket_path = crate::ipc_client::get_socket_path();
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, &socket_path.display().to_string());
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        project,
+        &socket_path.display().to_string(),
+    );
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({
@@ -400,7 +411,13 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
         cmd.args(&command[1..]);
     }
     let socket_path = crate::ipc_client::get_socket_path();
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, &socket_path.display().to_string());
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        project,
+        &socket_path.display().to_string(),
+    );
     let child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({

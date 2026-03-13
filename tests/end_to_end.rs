@@ -566,7 +566,11 @@ fn test_diff_dotenv_redacts_values() {
     lokalvault::vault_file::write_vault(&vault, "test-Strong-password-42!").unwrap();
 
     let env_path = dir.join("test.env");
-    fs::write(&env_path, "OPENAI_KEY=different-value\nNEW_KEY=added-value\n").unwrap();
+    fs::write(
+        &env_path,
+        "OPENAI_KEY=different-value\nNEW_KEY=added-value\n",
+    )
+    .unwrap();
 
     let diff = lokalvault::cli::cmd_diff(&env_path, Some("my-app")).unwrap();
 
