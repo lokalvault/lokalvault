@@ -645,8 +645,8 @@ pub fn invalidate_token(state: &DaemonState, token: &str) -> Result<(), String> 
     Ok(())
 }
 
-const RATE_LIMIT_MAX_REQUESTS: usize = 60;
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const RATE_LIMIT_MAX_REQUESTS: usize = 30;
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 
 pub fn check_rate_limit(state: &DaemonState, pid: u32) -> Result<(), String> {
     let mut limits = state.rate_limits.lock().map_err(|e| e.to_string())?;
@@ -654,7 +654,15 @@ pub fn check_rate_limit(state: &DaemonState, pid: u32) -> Result<(), String> {
     let timestamps = limits.entry(pid).or_default();
     timestamps.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
     if timestamps.len() >= RATE_LIMIT_MAX_REQUESTS {
-        return Err("rate limit exceeded".to_string());
+        let oldest = timestamps.first().copied();
+        let backoff_ms = oldest
+            .map(|t| {
+                let elapsed = now.duration_since(t);
+                let remaining = RATE_LIMIT_WINDOW.saturating_sub(elapsed);
+                (remaining.as_millis() as u64).max(100).min(5000)
+            })
+            .unwrap_or(1000);
+        return Err(format!("rate limit exceeded — retry after {backoff_ms}ms"));
     }
     timestamps.push(now);
     Ok(())
@@ -1426,10 +1434,11 @@ mod tests {
     #[test]
     fn test_rate_limit_allows_requests_within_window() {
         let state = sample_daemon_state();
-        for _ in 0..60 {
+        for _ in 0..30 {
             assert!(check_rate_limit(&state, 123).is_ok());
         }
-        assert!(check_rate_limit(&state, 123).is_err());
+        let err = check_rate_limit(&state, 123).unwrap_err();
+        assert!(err.contains("rate limit exceeded"));
         assert!(check_rate_limit(&state, 456).is_ok());
     }
 
