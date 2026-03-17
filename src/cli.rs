@@ -1412,7 +1412,7 @@ fn send_sensitive_ipc_request_with_approval(
 ) -> Result<serde_json::Value, String> {
     let action_token = register_action_token(scope, project, approval_proof)?;
     request["action_token"] = serde_json::Value::String(action_token);
-    send_ipc_request(request)
+    Ok(send_ipc_request(request)?)
 }
 
 fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, String> {

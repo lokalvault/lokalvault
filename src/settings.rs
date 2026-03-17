@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::vault_file::get_app_data_dir;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -53,22 +54,22 @@ pub fn read_settings() -> Settings {
     }
 }
 
-pub fn write_settings(settings: &Settings) -> Result<(), String> {
+pub fn write_settings(settings: &Settings) -> Result<(), AppError> {
     let path = get_settings_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)?;
     }
 
     let tmp_path = path.with_extension("json.tmp");
-    let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec_pretty(settings)?;
     OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(&tmp_path)
         .and_then(|mut file| std::io::Write::write_all(&mut file, &json))
-        .map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
