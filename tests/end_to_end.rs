@@ -24,6 +24,7 @@ fn setup_test_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", &dir) };
+    unsafe { std::env::set_var("LOKALVAULT_TEST_PIN_APPROVAL", "allow") };
     dir
 }
 
@@ -31,12 +32,19 @@ fn cleanup_test_dir() {
     let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
-fn wait_for_socket(socket: &std::path::Path) {
+fn wait_for_socket_or_child_exit(socket: &std::path::Path, child: &mut std::process::Child) {
     for _ in 0..50 {
         if socket.exists() {
             return;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "daemon exited before socket became ready (status {status}): {}",
+                socket.display()
+            );
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -55,8 +63,18 @@ fn spawn_real_daemon(vault: VaultData, password: &str) -> std::process::Child {
         .unwrap();
     daemon.stdin.take().unwrap().write_all(&input).unwrap();
 
-    wait_for_socket(&socket);
+    wait_for_socket_or_child_exit(&socket, &mut daemon);
     daemon
+}
+
+fn register_action_token(scope: &str, project: &str) -> String {
+    let response = send_ipc_request(json!({
+        "type": "register_action_token",
+        "scope": scope,
+        "project": project,
+    }))
+    .unwrap();
+    response["action_token"].as_str().unwrap().to_string()
 }
 
 fn shutdown_real_daemon(mut daemon: std::process::Child) {
@@ -83,6 +101,28 @@ fn seed_vault(password: &str, project: &str, secrets: &[(&str, &str)]) {
         }],
     };
     write_vault(&vault, password).unwrap();
+}
+
+fn queue_test_passwords(passwords: &[&str]) {
+    unsafe { std::env::set_var("LOKALVAULT_TEST_PASSWORDS", passwords.join("\n")) };
+}
+
+fn unix_sockets_available() -> bool {
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/lokalvault-socket-probe-{}.sock",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&path);
+    let result = std::os::unix::net::UnixListener::bind(&path);
+    match result {
+        Ok(listener) => {
+            drop(listener);
+            let _ = fs::remove_file(&path);
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("failed to probe unix socket support: {error}"),
+    }
 }
 
 #[test]
@@ -158,27 +198,33 @@ fn test_run_without_project_or_config_errors_cleanly() {
 #[test]
 fn test_run_with_project_config_uses_project_automatically() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
+    setup_test_dir();
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "test-value-123")]);
     let original_cwd = std::env::current_dir().unwrap();
     let temp = std::env::temp_dir().join("lokalvault-run-project-config");
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).unwrap();
     std::env::set_current_dir(&temp).unwrap();
     fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
-
-    let socket = "/tmp/lokalvault-test.sock";
-    let _ = fs::remove_file(socket);
-
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .arg("daemon-poc")
-        .spawn()
-        .unwrap();
-
-    for _ in 0..100 {
-        if std::path::Path::new(socket).exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        },
+        password,
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
         .args([
@@ -191,46 +237,84 @@ fn test_run_with_project_config_uses_project_automatically() {
         .output()
         .unwrap();
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
-    let _ = fs::remove_file(socket);
+    shutdown_real_daemon(daemon);
     let _ = fs::remove_file(".lokalvault");
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&temp);
+    cleanup_test_dir();
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "test-value-123\n");
 }
 
 #[test]
+fn test_run_with_project_config_and_locked_real_vault_fails_closed() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "real-secret")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-run-project-config-locked");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
+    fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
+        .args(["run", "--", "python3", "-c", "print('should-not-run')"])
+        .output()
+        .unwrap();
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
+    cleanup_test_dir();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("vault is locked"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("should-not-run"));
+}
+
+#[test]
 fn test_ipc_full_lifecycle() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
     setup_test_dir();
     let mut daemon = spawn_real_daemon(VaultData::new(), "password");
 
+    let add_token = register_action_token("vault_mutate", "my-app");
     let add = send_ipc_request(json!({
         "type": "add_secret",
         "project": "my-app",
         "key": "OPENAI_KEY",
         "value": "test-value-123",
-        "password": "password"
+        "action_token": add_token,
     }))
     .unwrap();
     assert_eq!(add["ok"], true);
 
+    let get_token = register_action_token("secret_read", "my-app");
     let get = send_ipc_request(json!({
         "type": "get_secret",
         "project": "my-app",
-        "key": "OPENAI_KEY"
+        "key": "OPENAI_KEY",
+        "action_token": get_token,
     }))
     .unwrap();
     assert_eq!(get["value"], "test-value-123");
 
+    let delete_token = register_action_token("vault_mutate", "my-app");
     let delete = send_ipc_request(json!({
         "type": "delete_secret",
         "project": "my-app",
         "key": "OPENAI_KEY",
-        "password": "password"
+        "action_token": delete_token,
     }))
     .unwrap();
     assert_eq!(delete["ok"], true);
@@ -244,6 +328,9 @@ fn test_ipc_full_lifecycle() {
 #[test]
 fn test_audit_log_records_daemon_access() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
     setup_test_dir();
     clear_audit_log().unwrap();
 
@@ -261,13 +348,15 @@ fn test_audit_log_records_daemon_access() {
     };
     let daemon = spawn_real_daemon(vault, "password");
 
+    let action_token = register_action_token("secret_read", "my-app");
     let response = send_ipc_request(json!({
         "type": "get_secret",
         "project": "my-app",
         "key": "OPENAI_KEY",
         "process_name": "python",
         "exe_path": "/usr/bin/python3",
-        "method": "cli_get"
+        "method": "cli_get",
+        "action_token": action_token,
     }))
     .unwrap();
     assert_eq!(response["value"], "test-value-123");
@@ -576,6 +665,9 @@ fn test_init_with_template_writes_required_keys() {
 #[test]
 fn test_diff_dotenv_redacts_values() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
     let dir = setup_test_dir();
     let daemon = spawn_real_daemon(
         VaultData {
@@ -629,6 +721,13 @@ fn test_project_template_required_keys() {
 #[test]
 fn test_status_includes_session_expiry_and_stale_secret_summary() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+    if !unix_sockets_available() {
+        cleanup_test_dir();
+        return;
+    }
+    let previous_tmpdir = std::env::var("TMPDIR").ok();
+    unsafe { std::env::set_var("TMPDIR", "/tmp") };
     clear_audit_log().unwrap();
     lokalvault::audit_log::log_access_event(lokalvault::audit_log::AccessEvent {
         timestamp: (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
@@ -641,41 +740,64 @@ fn test_status_includes_session_expiry_and_stale_secret_summary() {
     })
     .unwrap();
 
-    let state = start_daemon(VaultData {
-        version: 1,
-        projects: vec![Project {
-            name: "my-app".to_string(),
-            secrets: vec![Secret {
-                key: "OPENAI_KEY".to_string(),
-                value: zeroize::Zeroizing::new("test-value-123".to_string()),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                updated_at: "2026-01-01T00:00:00Z".to_string(),
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
             }],
-        }],
-    });
-
-    let uptime = lokalvault::daemon::daemon_uptime(&state).unwrap().as_secs();
-    let status = lokalvault::cli::cmd_status().unwrap_or_else(|_| {
-        format!(
-            "Session expires in: {}h {}m\nStale secrets: 1 secrets not accessed in 30+ days",
-            (480 - uptime / 60) / 60,
-            (480 - uptime / 60) % 60
-        )
-    });
-
-    let fallback_status = format!(
-        "Session expires in: {}h {}m\nStale secrets: 1 secrets not accessed in 30+ days",
-        (480 - uptime / 60) / 60,
-        (480 - uptime / 60) % 60
+        },
+        "password",
     );
-    let effective = if status.contains("Session expires in:") {
-        status
-    } else {
-        fallback_status
-    };
 
-    assert!(effective.contains("Session expires in:"));
-    assert!(effective.contains("Stale secrets: 1 secrets not accessed in 30+ days"));
+    let status = lokalvault::cli::cmd_status().unwrap();
+
+    assert!(status.contains("Vault:    unlocked"), "{status}");
+    assert!(
+        status.contains("Session expires in (estimated):"),
+        "{status}"
+    );
+    assert!(
+        status.contains(
+            "Stale secrets (based on available audit history): 1 secrets not accessed in 30+ days"
+        ),
+        "{status}"
+    );
+    shutdown_real_daemon(daemon);
+    match previous_tmpdir {
+        Some(value) => unsafe { std::env::set_var("TMPDIR", value) },
+        None => unsafe { std::env::remove_var("TMPDIR") },
+    }
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_cmd_dev_detects_real_package_manager_command() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let original_cwd = std::env::current_dir().unwrap();
+    let temp = std::env::temp_dir().join("lokalvault-dev-detect-package");
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).unwrap();
+    std::env::set_current_dir(&temp).unwrap();
+    fs::write(
+        "package.json",
+        "{\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"start\": \"node server.js\"\n  }\n}\n",
+    )
+    .unwrap();
+    fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
+
+    let detected = lokalvault::cli::cmd_dev().unwrap();
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&temp);
+
+    assert_eq!(detected, "npm run dev");
 }
 
 #[test]
@@ -709,12 +831,12 @@ fn test_share_claim_roundtrip_writes_manifest_and_audit_events() {
     .unwrap();
 
     std::env::set_current_dir(&sender).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     let share = cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
     assert!(share.contains("Included project setup"));
 
     std::env::set_current_dir(&recipient).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
 
     let config = read_project_config().unwrap().unwrap();
@@ -784,11 +906,11 @@ fn test_claim_merges_existing_same_project_manifest() {
     .unwrap();
 
     std::env::set_current_dir(&sender).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
     std::env::set_current_dir(&recipient).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
 
     let config = read_project_config().unwrap().unwrap();
@@ -834,11 +956,11 @@ fn test_claim_skips_conflicting_manifest_but_imports_secrets() {
     fs::write(recipient.join(".lokalvault"), original_manifest).unwrap();
 
     std::env::set_current_dir(&sender).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
     std::env::set_current_dir(&recipient).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
 
     assert!(claim.contains("Skipped setup due to conflicting"));
@@ -883,11 +1005,11 @@ fn test_claim_project_override_skips_manifest_write() {
     .unwrap();
 
     std::env::set_current_dir(&sender).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
     std::env::set_current_dir(&recipient).unwrap();
-    cli::push_test_passwords(&["share-pass", password]);
+    queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, Some("renamed-app")).unwrap();
 
     assert!(claim.contains("Skipped setup because --project overrides"));
@@ -907,40 +1029,193 @@ fn test_claim_project_override_skips_manifest_write() {
 }
 
 #[test]
+fn test_claim_updates_existing_secret_value_instead_of_silently_skipping() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "new-value")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-update-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-update-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(sender.join(".lokalvault"), "[project]\nname = \"my-app\"\n").unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    queue_test_passwords(&["share-pass", password]);
+    cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "old-value")]);
+    std::env::set_current_dir(&recipient).unwrap();
+    queue_test_passwords(&["share-pass", password]);
+    let claim = cli::cmd_claim(&bundle_path, None).unwrap();
+
+    let vault = read_vault(password).unwrap();
+    let project = vault
+        .projects
+        .iter()
+        .find(|project| project.name == "my-app")
+        .unwrap();
+    let secret = project
+        .secrets
+        .iter()
+        .find(|secret| secret.key == "OPENAI_KEY")
+        .unwrap();
+    assert_eq!(secret.value.as_str(), "new-value");
+    assert!(claim.contains("updated 1"));
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_share_refuses_to_overwrite_existing_bundle() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-overwrite");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    fs::create_dir_all(&sender).unwrap();
+    fs::write(sender.join(".lokalvault"), "[project]\nname = \"my-app\"\n").unwrap();
+    fs::write(&bundle_path, "existing").unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    queue_test_passwords(&["share-pass"]);
+    let error = cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap_err();
+
+    assert!(error.contains("refusing to overwrite"));
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PASSWORDS") };
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_claim_updates_live_daemon_state() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "new-value")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-daemon-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-daemon-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(sender.join(".lokalvault"), "[project]\nname = \"my-app\"\n").unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    queue_test_passwords(&["share-pass", password]);
+    cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("old-value".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        },
+        password,
+    );
+
+    std::env::set_current_dir(&recipient).unwrap();
+    queue_test_passwords(&["share-pass"]);
+    let claim = cli::cmd_claim(&bundle_path, None).unwrap();
+    assert!(claim.contains("updated 1"));
+
+    let action_token_response = send_ipc_request(json!({
+        "type": "register_action_token",
+        "scope": "secret_read",
+        "project": "my-app",
+    }))
+    .unwrap();
+    let action_token = action_token_response["action_token"].as_str().unwrap();
+    let response = send_ipc_request(json!({
+        "type": "get_secret",
+        "project": "my-app",
+        "key": "OPENAI_KEY",
+        "process_name": "test",
+        "exe_path": "test",
+        "method": "cli_get",
+        "action_token": action_token,
+    }))
+    .unwrap();
+    assert_eq!(response["value"], "new-value");
+
+    shutdown_real_daemon(daemon);
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
+}
+
+#[test]
 fn test_run_passthrough_preserves_child_exit_code() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
+    setup_test_dir();
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "test-value-123")]);
     let original_cwd = std::env::current_dir().unwrap();
     let temp = std::env::temp_dir().join("lokalvault-run-exit-code");
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).unwrap();
     std::env::set_current_dir(&temp).unwrap();
     fs::write(".lokalvault", "[project]\nname = \"my-app\"\n").unwrap();
-
-    let socket = "/tmp/lokalvault-test.sock";
-    let _ = fs::remove_file(socket);
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
-        .arg("daemon-poc")
-        .spawn()
-        .unwrap();
-
-    for _ in 0..100 {
-        if std::path::Path::new(socket).exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        },
+        password,
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))
         .args(["run", "--", "python3", "-c", "import sys; sys.exit(7)"])
         .output()
         .unwrap();
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
-    let _ = fs::remove_file(socket);
+    shutdown_real_daemon(daemon);
     let _ = fs::remove_file(".lokalvault");
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&temp);
+    cleanup_test_dir();
 
     assert_eq!(output.status.code(), Some(7));
 }

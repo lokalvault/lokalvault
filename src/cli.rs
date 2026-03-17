@@ -1,7 +1,9 @@
 use crate::audit_log::{
     AccessEvent, AuditFilter, clear_audit_log, log_access_event, read_audit_log,
 };
-use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
+use crate::ipc_client::{
+    cleanup_stale_socket, get_socket_path, is_daemon_running, send_ipc_request,
+};
 use crate::run_cmd::{
     ProjectConfig, configure_interactive_shell, get_project_from_config, inject_secrets_into_env,
     merge_project_config_manifest, read_project_config, shell_program, write_project_config,
@@ -15,7 +17,7 @@ use crate::vault_ops::{
 use rpassword::read_password;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -25,16 +27,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
-
-static TEST_PASSWORDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 const LOKALVAULT_MANAGED_AGENTS_MARKER: &str = "<!-- lokalvault-managed:agents -->";
 const SHARE_BUNDLE_SENTINEL_KEY: &str = "__share_bundle__";
 const SHARE_BUNDLE_CREATED_METHOD: &str = "share_bundle_created";
 const SHARE_BUNDLE_CLAIMED_METHOD: &str = "share_bundle_claimed";
+const SHARE_BUNDLE_EXPORT_METHOD: &str = "share_bundle_export";
+const TEST_PASSWORD_ENV: &str = "LOKALVAULT_TEST_PASSWORDS";
+const ACTION_SCOPE_SECRET_READ: &str = "secret_read";
+const ACTION_SCOPE_SECRET_EXPORT: &str = "secret_export";
+const ACTION_SCOPE_VAULT_MUTATE: &str = "vault_mutate";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ShareBundleManifest {
@@ -55,6 +59,11 @@ struct ShareBundlePayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest: Option<ShareBundleManifest>,
     secrets: Vec<ShareBundleSecret>,
+}
+
+struct ClaimImportResult {
+    added: usize,
+    updated: usize,
 }
 
 enum ClaimManifestResult {
@@ -125,12 +134,8 @@ pub fn prompt_password(prompt: &str) -> Result<String, String> {
     eprint!("{prompt}");
     io::stderr().flush().map_err(|e| e.to_string())?;
 
-    {
-        let passwords = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
-        let mut passwords = passwords.lock().map_err(|e| e.to_string())?;
-        if !passwords.is_empty() {
-            return Ok(passwords.remove(0));
-        }
+    if let Some(password) = take_test_password()? {
+        return Ok(password);
     }
 
     read_password().map_err(|e| e.to_string())
@@ -197,6 +202,7 @@ impl ProjectTemplate {
 }
 
 pub fn cmd_lock() -> Result<String, String> {
+    cleanup_stale_socket();
     if !is_daemon_running() {
         return Ok("Vault already locked.".to_string());
     }
@@ -268,12 +274,17 @@ pub fn cmd_add(
     };
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "add_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("add secret {key} to {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Added {key} to {project}"));
         }
@@ -305,12 +316,17 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     };
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "update_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("update secret {key} in {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Updated {key} in {project}"));
         }
@@ -328,11 +344,16 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "delete_secret",
             "project": project,
             "key": key,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("delete secret {key} from {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted {key} from {project}"));
         }
@@ -348,10 +369,15 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
 
 pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "delete_project",
             "project": project,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(project),
+            &format!("delete project {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted project {project}"));
         }
@@ -420,14 +446,19 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "get_secret",
             "project": project,
             "key": key,
             "process_name": current_process_name(),
             "exe_path": current_exe_path(),
             "method": "cli_get",
-        }))?;
+            }),
+            ACTION_SCOPE_SECRET_READ,
+            Some(&project),
+            &format!("read secret {key} from {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(response["value"].as_str().unwrap_or("").to_string());
         }
@@ -468,6 +499,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     }
 
     if is_daemon_running() {
+        approve_sensitive_action(project, &format!("import secrets into {project}"))?;
         let mut imported = 0usize;
         let mut skipped = 0usize;
         for raw_line in preview.lines() {
@@ -479,12 +511,16 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
                 skipped += 1;
                 continue;
             };
-            let response = send_ipc_request(json!({
-                "type": "add_secret",
-                "project": project,
-                "key": key.trim(),
-                "value": value.trim(),
-            }))?;
+            let response = send_sensitive_ipc_request_with_approval(
+                json!({
+                    "type": "add_secret",
+                    "project": project,
+                    "key": key.trim(),
+                    "value": value.trim(),
+                }),
+                ACTION_SCOPE_VAULT_MUTATE,
+                Some(project),
+            )?;
             if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
                 imported += 1;
             } else {
@@ -912,14 +948,7 @@ pub fn cmd_doctor() -> Result<(String, bool), String> {
 }
 
 pub fn cmd_dev() -> Result<String, String> {
-    let detected = if Path::new(".lokalvault").exists() {
-        vec![
-            "lokalvault".to_string(),
-            "run".to_string(),
-            "--".to_string(),
-            "true".to_string(),
-        ]
-    } else if Path::new("package.json").exists() {
+    let detected = if Path::new("package.json").exists() {
         let package = fs::read_to_string("package.json").map_err(|e| e.to_string())?;
         if package.contains("\"dev\"") {
             vec!["npm".to_string(), "run".to_string(), "dev".to_string()]
@@ -1058,8 +1087,16 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
 }
 
 pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
+    let output_path = output
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{project}.lve"));
+    if Path::new(&output_path).exists() {
+        return Err(format!(
+            "refusing to overwrite existing file: {output_path}"
+        ));
+    }
     let share_password = prompt_password("Share password: ")?;
-    let secrets = get_project_secret_map(project)?;
+    let secrets = get_project_secret_map_with_method(project, Some(SHARE_BUNDLE_EXPORT_METHOD))?;
     let manifest = current_project_manifest(project)?;
     let payload = ShareBundlePayload {
         project: project.to_string(),
@@ -1070,9 +1107,6 @@ pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> 
             .map(|(key, value)| ShareBundleSecret { key, value })
             .collect(),
     };
-    let output_path = output
-        .map(ToString::to_string)
-        .unwrap_or_else(|| format!("{project}.lve"));
     write_lve_file(
         Path::new(&output_path),
         &share_password,
@@ -1097,31 +1131,20 @@ pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
     let project_name = project
         .map(ToString::to_string)
         .unwrap_or_else(|| bundle_project.clone());
-
-    let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
-    if !vault
-        .projects
-        .iter()
-        .any(|entry| entry.name == project_name)
-    {
-        add_project(&mut vault, &project_name).map_err(|e| e.to_string())?;
-    }
-
-    let mut imported = 0usize;
-    for secret in &payload.secrets {
-        if add_secret(&mut vault, &project_name, &secret.key, &secret.value).is_ok() {
-            imported += 1;
-        }
-    }
-
-    crate::vault_file::write_vault(&vault, &password)?;
+    let import_result = if is_daemon_running() {
+        import_bundle_into_daemon(&project_name, &payload.secrets)?
+    } else {
+        let password = prompt_password("Master password: ")?;
+        import_bundle_offline(&password, &project_name, &payload.secrets)?
+    };
     let manifest_result =
         apply_bundle_manifest(payload.manifest.as_ref(), &bundle_project, &project_name)?;
     log_share_bundle_event(&project_name, SHARE_BUNDLE_CLAIMED_METHOD)?;
     Ok(format!(
-        "✓ Imported {imported} secrets into {project_name}\n{}",
-        manifest_result.message()
+        "✓ Imported {} secrets into {project_name} (updated {})\n{}",
+        import_result.added,
+        import_result.updated,
+        manifest_result.message(),
     ))
 }
 
@@ -1208,8 +1231,24 @@ fn resolve_project(project: Option<&str>) -> Result<String, String> {
 }
 
 fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, String> {
+    get_project_secret_map_with_method(project, None)
+}
+
+fn get_project_secret_map_with_method(
+    project: &str,
+    method: Option<&str>,
+) -> Result<HashMap<String, String>, String> {
     if is_daemon_running() {
-        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        let mut request = json!({ "type": "get_all_secrets", "project": project });
+        if let Some(method) = method {
+            request["method"] = serde_json::Value::String(method.to_string());
+        }
+        let response = send_sensitive_ipc_request(
+            request,
+            ACTION_SCOPE_SECRET_EXPORT,
+            Some(project),
+            &format!("export secrets for {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
             return Err(response_error(&response));
         }
@@ -1234,6 +1273,158 @@ fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, Stri
         .iter()
         .map(|secret| (secret.key.clone(), secret.value.to_string()))
         .collect())
+}
+
+fn import_bundle_into_daemon(
+    project: &str,
+    secrets: &[ShareBundleSecret],
+) -> Result<ClaimImportResult, String> {
+    approve_sensitive_action(project, &format!("import shared secrets into {project}"))?;
+    let mut existing_keys = daemon_project_keys(project)?;
+    let mut result = ClaimImportResult {
+        added: 0,
+        updated: 0,
+    };
+
+    for secret in secrets {
+        let request = if existing_keys.contains(&secret.key) {
+            result.updated += 1;
+            json!({
+                "type": "update_secret",
+                "project": project,
+                "key": secret.key,
+                "value": secret.value,
+            })
+        } else {
+            result.added += 1;
+            existing_keys.insert(secret.key.clone());
+            json!({
+                "type": "add_secret",
+                "project": project,
+                "key": secret.key,
+                "value": secret.value,
+            })
+        };
+        let response = send_sensitive_ipc_request_with_approval(
+            request,
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(project),
+        )?;
+        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(response_error(&response));
+        }
+    }
+
+    Ok(result)
+}
+
+fn import_bundle_offline(
+    password: &str,
+    project: &str,
+    secrets: &[ShareBundleSecret],
+) -> Result<ClaimImportResult, String> {
+    let mut vault = unlock_vault(password).map_err(|e| e.to_string())?;
+    if !vault.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut vault, project).map_err(|e| e.to_string())?;
+    }
+
+    let mut existing_keys = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .map(|entry| {
+            entry
+                .secrets
+                .iter()
+                .map(|secret| secret.key.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut result = ClaimImportResult {
+        added: 0,
+        updated: 0,
+    };
+
+    for secret in secrets {
+        if existing_keys.contains(&secret.key) {
+            update_secret(&mut vault, project, &secret.key, &secret.value)
+                .map_err(|e| e.to_string())?;
+            result.updated += 1;
+        } else {
+            add_secret(&mut vault, project, &secret.key, &secret.value)
+                .map_err(|e| e.to_string())?;
+            existing_keys.insert(secret.key.clone());
+            result.added += 1;
+        }
+    }
+
+    crate::vault_file::write_vault(&vault, password)?;
+    Ok(result)
+}
+
+fn daemon_project_keys(project: &str) -> Result<HashSet<String>, String> {
+    let response = send_ipc_request(json!({ "type": "list_keys", "project": project }))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(response["keys"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(ToString::to_string)
+            .collect());
+    }
+
+    let error = response_error(&response);
+    if error.contains("project not found") {
+        return Ok(HashSet::new());
+    }
+    Err(error)
+}
+
+fn approve_sensitive_action(project: &str, action_preview: &str) -> Result<(), String> {
+    if crate::run_cmd::show_pin_dialog(project, action_preview)? {
+        return Ok(());
+    }
+    Err(format!("approval denied for {action_preview}"))
+}
+
+fn register_action_token(scope: &str, project: Option<&str>) -> Result<String, String> {
+    let mut request = json!({
+        "type": "register_action_token",
+        "scope": scope,
+    });
+    if let Some(project) = project {
+        request["project"] = serde_json::Value::String(project.to_string());
+    }
+    let response = send_ipc_request(request)?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
+    }
+    response["action_token"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| "daemon response missing action_token".to_string())
+}
+
+fn send_sensitive_ipc_request(
+    request: serde_json::Value,
+    scope: &str,
+    project: Option<&str>,
+    action_preview: &str,
+) -> Result<serde_json::Value, String> {
+    let approval_project = project.unwrap_or("lokalvault");
+    approve_sensitive_action(approval_project, action_preview)?;
+    send_sensitive_ipc_request_with_approval(request, scope, project)
+}
+
+fn send_sensitive_ipc_request_with_approval(
+    mut request: serde_json::Value,
+    scope: &str,
+    project: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let action_token = register_action_token(scope, project)?;
+    request["action_token"] = serde_json::Value::String(action_token);
+    send_ipc_request(request)
 }
 
 fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, String> {
@@ -1425,8 +1616,39 @@ fn count_stale_secret_keys(
 fn is_share_bundle_event(method: &str) -> bool {
     matches!(
         method,
-        SHARE_BUNDLE_CREATED_METHOD | SHARE_BUNDLE_CLAIMED_METHOD
+        SHARE_BUNDLE_CREATED_METHOD | SHARE_BUNDLE_CLAIMED_METHOD | SHARE_BUNDLE_EXPORT_METHOD
     )
+}
+
+fn take_test_password() -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Ok(None);
+    }
+
+    let raw = match env::var(TEST_PASSWORD_ENV) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(format!("{TEST_PASSWORD_ENV} contains invalid unicode"));
+        }
+    };
+
+    let mut passwords = raw
+        .split('\n')
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if passwords.is_empty() {
+        return Ok(None);
+    }
+
+    let password = passwords.remove(0);
+    if passwords.is_empty() {
+        unsafe { env::remove_var(TEST_PASSWORD_ENV) };
+    } else {
+        unsafe { env::set_var(TEST_PASSWORD_ENV, passwords.join("\n")) };
+    }
+    Ok(Some(password))
 }
 
 fn get_setting_value(settings: &Settings, key: &str) -> Result<String, String> {
@@ -1465,6 +1687,7 @@ fn parse_bool(value: &str, key: &str) -> Result<bool, String> {
 }
 
 fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String> {
+    cleanup_stale_socket();
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     command
         .arg("daemon")
@@ -1499,7 +1722,8 @@ fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             return Err(format!("daemon exited during startup with status {status}"));
         }
-        if get_socket_path().exists() {
+        cleanup_stale_socket();
+        if is_daemon_running() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -1645,14 +1869,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
-#[doc(hidden)]
-pub fn push_test_passwords(passwords: &[&str]) {
-    let queue = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
-    queue.clear();
-    queue.extend(passwords.iter().map(|password| (*password).to_string()));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1675,6 +1891,7 @@ mod tests {
             &[
                 sample_event("share_bundle_created", SHARE_BUNDLE_SENTINEL_KEY, 31),
                 sample_event("share_bundle_claimed", SHARE_BUNDLE_SENTINEL_KEY, 31),
+                sample_event("share_bundle_export", "OPENAI_KEY", 31),
                 sample_event("run_env", "OLD_SECRET", 31),
             ],
             30,

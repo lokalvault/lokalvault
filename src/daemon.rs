@@ -1,4 +1,4 @@
-use crate::crypto::constant_time_compare;
+use crate::crypto::{constant_time_compare, generate_token};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -29,6 +29,9 @@ use crate::vault_ops::{
 
 pub const POC_SOCKET_PATH: &str = "/tmp/lokalvault-test.sock";
 const PHASE1_PENDING_WINDOW: Duration = Duration::from_millis(1000);
+const ACTION_TOKEN_WINDOW: Duration = Duration::from_secs(30);
+const MACOS_RATE_LIMIT_PID_OFFSET: u32 = 1_000_000_000;
+const TEST_POC_SOCKET_ENV: &str = "LOKALVAULT_TEST_POC_SOCKET";
 
 struct PeerCredentials {
     pid: u32,
@@ -41,6 +44,24 @@ enum TokenState {
     Active,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionScope {
+    SecretRead,
+    SecretExport,
+    VaultMutate,
+}
+
+impl ActionScope {
+    fn parse(input: &str) -> Result<Self, String> {
+        match input {
+            "secret_read" => Ok(Self::SecretRead),
+            "secret_export" => Ok(Self::SecretExport),
+            "vault_mutate" => Ok(Self::VaultMutate),
+            _ => Err(format!("unsupported action scope: {input}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TokenRecord {
     uid: u32,
@@ -50,10 +71,20 @@ struct TokenRecord {
     deadline: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ActionTokenRecord {
+    uid: u32,
+    pid: Option<u32>,
+    project: Option<String>,
+    scope: ActionScope,
+    deadline: Instant,
+}
+
 #[derive(Clone)]
 pub struct DaemonState {
     vault: Arc<Mutex<VaultData>>,
     token_store: Arc<Mutex<Vec<(String, TokenRecord)>>>,
+    action_token_store: Arc<Mutex<Vec<(String, ActionTokenRecord)>>>,
     password: Arc<Mutex<Zeroizing<String>>>,
     last_activity: Arc<Mutex<Instant>>,
     started_at: Arc<Mutex<Instant>>,
@@ -137,7 +168,7 @@ fn peer_pid_is_required() -> bool {
 }
 
 pub fn create_socket() -> Result<(PathBuf, UnixListener), String> {
-    create_socket_at_path(PathBuf::from(POC_SOCKET_PATH))
+    create_socket_at_path(poc_socket_path())
 }
 
 pub fn create_user_socket() -> Result<(PathBuf, UnixListener), String> {
@@ -145,7 +176,16 @@ pub fn create_user_socket() -> Result<(PathBuf, UnixListener), String> {
 }
 
 pub async fn run_daemon_poc() -> Result<(), String> {
-    run_daemon_poc_at_path(PathBuf::from(POC_SOCKET_PATH)).await
+    run_daemon_poc_at_path(poc_socket_path()).await
+}
+
+pub fn poc_socket_path() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var(TEST_POC_SOCKET_ENV) {
+        return PathBuf::from(path);
+    }
+
+    PathBuf::from(POC_SOCKET_PATH)
 }
 
 pub async fn run_daemon_server(vault_data: VaultData, password: String) -> Result<(), String> {
@@ -225,6 +265,7 @@ pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> Da
     DaemonState {
         vault: Arc::new(Mutex::new(vault_data)),
         token_store: Arc::new(Mutex::new(Vec::new())),
+        action_token_store: Arc::new(Mutex::new(Vec::new())),
         password: Arc::new(Mutex::new(Zeroizing::new(password))),
         last_activity: Arc::new(Mutex::new(Instant::now())),
         started_at: Arc::new(Mutex::new(Instant::now())),
@@ -339,6 +380,28 @@ pub fn register_token_phase2(
     record.pid = pid;
     record.state = TokenState::Active;
     record.deadline = Instant::now() + session_timeout;
+    Ok(())
+}
+
+fn register_action_token(
+    state: &DaemonState,
+    token: &str,
+    uid: u32,
+    pid: u32,
+    scope: ActionScope,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let mut action_token_store = state.action_token_store.lock().map_err(|e| e.to_string())?;
+    action_token_store.push((
+        token.to_string(),
+        ActionTokenRecord {
+            uid,
+            pid: normalized_peer_pid(pid),
+            project: project.map(ToString::to_string),
+            scope,
+            deadline: Instant::now() + ACTION_TOKEN_WINDOW,
+        },
+    ));
     Ok(())
 }
 
@@ -674,6 +737,73 @@ pub fn check_rate_limit(state: &DaemonState, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+fn authorize_action_token(
+    state: &DaemonState,
+    request: &serde_json::Value,
+    peer_pid: u32,
+    peer_uid: u32,
+    scope: ActionScope,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let token = request
+        .get("action_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "missing action_token".to_string())?;
+    consume_action_token(state, token, peer_pid, peer_uid, scope, project)
+}
+
+fn consume_action_token(
+    state: &DaemonState,
+    token: &str,
+    peer_pid: u32,
+    peer_uid: u32,
+    scope: ActionScope,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let mut action_token_store = state.action_token_store.lock().map_err(|e| e.to_string())?;
+    let index = action_token_store
+        .iter()
+        .position(|(stored_token, _)| constant_time_compare(stored_token, token))
+        .ok_or_else(|| "action token invalid".to_string())?;
+    let record = action_token_store[index].1.clone();
+
+    if Instant::now() > record.deadline {
+        action_token_store.remove(index);
+        return Err("action token expired".to_string());
+    }
+    if record.uid != peer_uid {
+        return Err("action token uid mismatch".to_string());
+    }
+    if let Some(expected_pid) = record.pid
+        && normalized_peer_pid(peer_pid) != Some(expected_pid)
+    {
+        return Err("action token pid mismatch".to_string());
+    }
+    if record.scope != scope {
+        return Err("action token scope mismatch".to_string());
+    }
+    match (&record.project, project) {
+        (Some(expected), Some(actual)) if expected != actual => {
+            return Err("action token project mismatch".to_string());
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("action token project mismatch".to_string());
+        }
+        _ => {}
+    }
+
+    action_token_store.remove(index);
+    Ok(())
+}
+
+fn normalized_peer_pid(pid: u32) -> Option<u32> {
+    if pid == 0 { None } else { Some(pid) }
+}
+
+fn rate_limit_key(pid: u32, uid: u32) -> u32 {
+    normalized_peer_pid(pid).unwrap_or(MACOS_RATE_LIMIT_PID_OFFSET.saturating_add(uid))
+}
+
 pub fn disable_core_dumps() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -758,6 +888,9 @@ fn project_for_token(state: &DaemonState, token: &str) -> Option<String> {
 fn invalidate_all_tokens(state: &DaemonState) -> Result<(), String> {
     let mut token_store = state.token_store.lock().map_err(|e| e.to_string())?;
     token_store.clear();
+    drop(token_store);
+    let mut action_token_store = state.action_token_store.lock().map_err(|e| e.to_string())?;
+    action_token_store.clear();
     Ok(())
 }
 
@@ -868,7 +1001,7 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
         return Ok(false);
     }
 
-    if check_rate_limit(state, peer_pid).is_err() {
+    if check_rate_limit(state, rate_limit_key(peer_pid, uid)).is_err() {
         let mut payload =
             serde_json::to_string(&json!({ "ok": false, "error": "rate limit exceeded" }))
                 .map_err(|e| e.to_string())?;
@@ -920,6 +1053,14 @@ fn handle_ipc_request(
                 .get("key")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing key".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::SecretRead,
+                Some(project),
+            )?;
             let value = get_secret_value_for_boundary(state, project, key)?;
             let process_name = request
                 .get("process_name")
@@ -960,6 +1101,14 @@ fn handle_ipc_request(
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing value".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::VaultMutate,
+                Some(project),
+            )?;
             upsert_secret(state, project, key, value)?;
             json!({ "ok": true })
         }
@@ -976,6 +1125,14 @@ fn handle_ipc_request(
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing value".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::VaultMutate,
+                Some(project),
+            )?;
             update_secret_in_state(state, project, key, value)?;
             json!({ "ok": true })
         }
@@ -997,6 +1154,14 @@ fn handle_ipc_request(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("cli_export")
                 .to_string();
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::SecretExport,
+                Some(project),
+            )?;
             let secrets = get_all_project_secrets_for_boundary(state, project)?;
             for key in secrets.keys() {
                 log_access_event(AccessEvent {
@@ -1020,6 +1185,14 @@ fn handle_ipc_request(
                 .get("key")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing key".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::VaultMutate,
+                Some(project),
+            )?;
             delete_secret_from_state(state, project, key)?;
             json!({ "ok": true })
         }
@@ -1028,6 +1201,14 @@ fn handle_ipc_request(
                 .get("project")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing project".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::VaultMutate,
+                Some(project),
+            )?;
             delete_project_from_state(state, project)?;
             json!({ "ok": true })
         }
@@ -1057,20 +1238,41 @@ fn handle_ipc_request(
                 .get("token")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "missing token".to_string())?;
+            let child_pid = request
+                .get("pid")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "missing pid".to_string())? as u32;
+            if child_pid == 0 {
+                return Err("invalid pid".to_string());
+            }
+            if normalized_peer_pid(peer_pid) == Some(child_pid) {
+                return Err("child pid must differ from requester pid".to_string());
+            }
             let timeout_minutes = read_settings().session_timeout_minutes as u64;
             register_token_phase2(
                 state,
                 token,
-                peer_pid,
+                child_pid,
                 Duration::from_secs(timeout_minutes * 60),
             )?;
             monitor_child_pid(
                 state.clone(),
-                peer_pid,
+                child_pid,
                 token.to_string(),
                 Duration::from_millis(100),
             );
             json!({ "ok": true })
+        }
+        "register_action_token" => {
+            let scope = request
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing scope".to_string())?;
+            let scope = ActionScope::parse(scope)?;
+            let project = request.get("project").and_then(serde_json::Value::as_str);
+            let action_token = generate_token();
+            register_action_token(state, &action_token, peer_uid, peer_pid, scope, project)?;
+            json!({ "ok": true, "action_token": action_token })
         }
         "get_all_secrets_for_run" => {
             let token = request
@@ -1109,12 +1311,6 @@ fn handle_ipc_request(
                 "blocked": !matches.is_empty(),
                 "matches": matches,
             })
-        }
-        "log_access" => {
-            let event: AccessEvent =
-                serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
-            log_access_event(event)?;
-            json!({ "ok": true })
         }
         "shutdown" => json!({ "ok": true }),
         _ => json!({ "ok": false, "error": "unsupported request type" }),
@@ -1235,7 +1431,9 @@ fn cleanup_socket_file(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::DATA_DIR_LOCK;
     use crate::vault_file::{Project, Secret};
+    use tokio::time::timeout;
 
     fn sample_daemon_state() -> DaemonState {
         start_daemon(VaultData {
@@ -1250,6 +1448,60 @@ mod tests {
                 }],
             }],
         })
+    }
+
+    async fn wait_for_poc_socket(socket_path: &Path, daemon: &JoinHandle<Result<(), String>>) {
+        for _ in 0..100 {
+            if socket_path.exists() {
+                return;
+            }
+            if daemon.is_finished() {
+                panic!(
+                    "daemon task exited before socket became ready: {}",
+                    socket_path.display()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("daemon socket did not appear: {}", socket_path.display());
+    }
+
+    async fn await_daemon(daemon: JoinHandle<Result<(), String>>) -> Result<(), String> {
+        timeout(Duration::from_secs(3), daemon)
+            .await
+            .map_err(|_| "daemon task timed out".to_string())?
+            .map_err(|error| error.to_string())?
+    }
+
+    fn unix_sockets_available() -> bool {
+        let socket_path = unique_poc_socket_path("daemon-probe");
+        let _ = cleanup_socket_file(&socket_path);
+        let result = std::os::unix::net::UnixListener::bind(&socket_path);
+        match result {
+            Ok(listener) => {
+                drop(listener);
+                let _ = cleanup_socket_file(&socket_path);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+            Err(error) => panic!("failed to probe unix socket support: {error}"),
+        }
+    }
+
+    fn setup_test_data_dir(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "lokalvault-daemon-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", &path) };
+        path
+    }
+
+    fn cleanup_test_data_dir(path: &Path) {
+        unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]
@@ -1285,6 +1537,133 @@ mod tests {
             .unwrap();
         assert_eq!(record.pid, 777);
         assert_eq!(record.state, TokenState::Active);
+    }
+
+    #[test]
+    fn test_sensitive_ipc_rejects_missing_action_token() {
+        let state = sample_daemon_state();
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "get_secret",
+                "project": "my-app",
+                "key": "OPENAI_KEY",
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "missing action_token");
+    }
+
+    #[test]
+    fn test_sensitive_ipc_rejects_wrong_scope_action_token() {
+        let state = sample_daemon_state();
+        let registration = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_action_token",
+                "scope": "secret_export",
+                "project": "my-app",
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+        let action_token = registration["action_token"].as_str().unwrap();
+
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "get_secret",
+                "project": "my-app",
+                "key": "OPENAI_KEY",
+                "action_token": action_token,
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "action token scope mismatch");
+    }
+
+    #[test]
+    fn test_sensitive_ipc_accepts_action_token_once_and_rejects_reuse() {
+        let state = sample_daemon_state();
+        let registration = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_action_token",
+                "scope": "secret_read",
+                "project": "my-app",
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+        let action_token = registration["action_token"].as_str().unwrap().to_string();
+
+        consume_action_token(
+            &state,
+            &action_token,
+            777,
+            501,
+            ActionScope::SecretRead,
+            Some("my-app"),
+        )
+        .unwrap();
+
+        let error = consume_action_token(
+            &state,
+            &action_token,
+            777,
+            501,
+            ActionScope::SecretRead,
+            Some("my-app"),
+        )
+        .unwrap_err();
+        assert_eq!(error, "action token invalid");
+    }
+
+    #[test]
+    fn test_register_token_phase2_route_requires_explicit_pid() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_token_phase2",
+                "token": "token-1",
+            }),
+            333,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "missing pid");
+    }
+
+    #[test]
+    fn test_register_token_phase2_route_rejects_requester_pid() {
+        let state = sample_daemon_state();
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_token_phase2",
+                "token": "token-1",
+                "pid": 333,
+            }),
+            333,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "child pid must differ from requester pid");
     }
 
     #[test]
@@ -1449,8 +1828,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rate_limit_key_does_not_treat_pid_zero_as_real_process_identity() {
+        assert_eq!(rate_limit_key(123, 501), 123);
+        assert_ne!(rate_limit_key(0, 501), 0);
+    }
+
+    #[test]
     fn test_upsert_adds_secret_and_updates_in_memory_state() {
-        let state = sample_daemon_state();
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data_dir = setup_test_data_dir("upsert");
+        let state = start_daemon_with_password(
+            VaultData {
+                version: 1,
+                projects: vec![Project {
+                    name: "my-app".to_string(),
+                    secrets: vec![Secret {
+                        key: "OPENAI_KEY".to_string(),
+                        value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                        created_at: "2026-01-01T00:00:00Z".to_string(),
+                        updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    }],
+                }],
+            },
+            "test-password".to_string(),
+        );
 
         {
             let vault = state.vault.lock().unwrap();
@@ -1494,6 +1895,8 @@ mod tests {
                 .unwrap();
             assert_eq!(new_secret.value.as_str(), "new-value");
         }
+
+        cleanup_test_data_dir(&data_dir);
     }
 
     #[test]
@@ -1547,6 +1950,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_get_peer_credentials_returns_current_process_uid() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-peercred");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -1570,6 +1976,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_get_peer_credentials_returns_current_process_uid_on_macos() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-peercred-macos");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -1592,6 +2001,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_socket_sets_permissions_to_0600() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-perms");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -1605,17 +2017,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_returns_hardcoded_json() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-response");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = loop {
             match UnixStream::connect(&socket_path_string).await {
@@ -1642,24 +2052,22 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["value"], "test-value-123");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert!(daemon_result.is_ok());
         assert!(!Path::new(&socket_path_string).exists());
     }
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_client_reported_uid_mismatch() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-bad-uid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1678,24 +2086,22 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "client-reported uid mismatch");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "client-reported uid mismatch");
         assert!(!Path::new(&socket_path_string).exists());
     }
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_get_secret_without_uid() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-missing-uid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1712,7 +2118,7 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "get_secret request missing uid");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "get_secret request missing uid");
         assert!(!Path::new(&socket_path_string).exists());
     }
@@ -1720,17 +2126,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_get_secret_without_pid_on_linux() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-missing-pid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1748,7 +2152,7 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "get_secret request missing pid");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "get_secret request missing pid");
         assert!(!Path::new(&socket_path_string).exists());
     }
@@ -1756,17 +2160,15 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_nonzero_pid_claim_on_linux() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-bad-pid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1785,24 +2187,22 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "client-reported pid mismatch");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "client-reported pid mismatch");
         assert!(!Path::new(&socket_path_string).exists());
     }
 
     #[tokio::test]
     async fn test_run_daemon_poc_returns_structured_error_for_unsupported_request_type() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-bad-type");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1819,24 +2219,22 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "unsupported request type");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "unsupported request type");
         assert!(!Path::new(&socket_path_string).exists());
     }
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_unknown_secret_key() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("daemon-bad-key");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let mut stream = UnixStream::connect(&socket_path_string).await.unwrap();
         let request = json!({
@@ -1855,7 +2253,7 @@ mod tests {
         let response_json: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response_json["error"], "unknown secret key");
 
-        let daemon_result = daemon.await.unwrap();
+        let daemon_result = await_daemon(daemon).await;
         assert_eq!(daemon_result.unwrap_err(), "unknown secret key");
         assert!(!Path::new(&socket_path_string).exists());
     }
