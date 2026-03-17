@@ -20,19 +20,39 @@ use std::time::Duration;
 
 static END_TO_END_LOCK: Mutex<()> = Mutex::new(());
 
-fn setup_test_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
-    unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", &dir) };
+fn test_data_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("lokalvault-e2e-test-{name}-{}", std::process::id()))
+}
+
+fn activate_test_dir(dir: &std::path::Path) {
+    unsafe { std::env::set_var("LOKALVAULT_DATA_DIR", dir) };
     unsafe { std::env::set_var("LOKALVAULT_TEST_PIN_APPROVAL", "allow") };
+}
+
+fn setup_test_dir() -> std::path::PathBuf {
+    let dir = test_data_dir("default");
+    let _ = std::fs::create_dir_all(&dir);
+    activate_test_dir(&dir);
     dir
 }
 
 fn cleanup_test_dir() {
-    let dir = std::env::temp_dir().join(format!("lokalvault-e2e-test-{}", std::process::id()));
+    let dir = test_data_dir("default");
     let _ = std::fs::remove_dir_all(&dir);
     unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
     unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
+}
+
+fn setup_named_test_dir(name: &str) -> std::path::PathBuf {
+    let dir = test_data_dir(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    activate_test_dir(&dir);
+    dir
+}
+
+fn cleanup_named_test_dir(dir: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn wait_for_socket_or_child_exit(socket: &std::path::Path, child: &mut std::process::Child) {
@@ -818,7 +838,7 @@ fn test_cmd_dev_detects_real_package_manager_command() {
 #[test]
 fn test_share_claim_roundtrip_writes_manifest_and_audit_events() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("share-sender");
     clear_audit_log().unwrap();
 
     let password = "test-Strong-password-42!";
@@ -849,7 +869,16 @@ fn test_share_claim_roundtrip_writes_manifest_and_audit_events() {
     queue_test_passwords(&["share-pass", password]);
     let share = cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
     assert!(share.contains("Included project setup"));
+    let sender_methods = read_audit_log(None)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.method)
+        .collect::<Vec<_>>();
+    assert!(sender_methods.contains(&"share_bundle_created".to_string()));
 
+    let recipient_data_dir = setup_named_test_dir("share-recipient");
+    write_vault(&VaultData::new(), password).unwrap();
+    clear_audit_log().unwrap();
     std::env::set_current_dir(&recipient).unwrap();
     queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
@@ -878,25 +907,26 @@ fn test_share_claim_roundtrip_writes_manifest_and_audit_events() {
             .iter()
             .any(|secret| secret.key == "DATABASE_URL")
     );
-
-    let methods = read_audit_log(None)
+    let recipient_methods = read_audit_log(None)
         .unwrap()
         .into_iter()
         .map(|event| event.method)
         .collect::<Vec<_>>();
-    assert!(methods.contains(&"share_bundle_created".to_string()));
-    assert!(methods.contains(&"share_bundle_claimed".to_string()));
+    assert!(recipient_methods.contains(&"share_bundle_claimed".to_string()));
 
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]
 fn test_claim_merges_existing_same_project_manifest() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("merge-sender");
 
     let password = "test-Strong-password-42!";
     seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
@@ -924,6 +954,8 @@ fn test_claim_merges_existing_same_project_manifest() {
     queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
+    let recipient_data_dir = setup_named_test_dir("merge-recipient");
+    write_vault(&VaultData::new(), password).unwrap();
     std::env::set_current_dir(&recipient).unwrap();
     queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
@@ -942,13 +974,16 @@ fn test_claim_merges_existing_same_project_manifest() {
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]
 fn test_claim_skips_conflicting_manifest_but_imports_secrets() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("conflict-sender");
 
     let password = "test-Strong-password-42!";
     seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
@@ -974,6 +1009,8 @@ fn test_claim_skips_conflicting_manifest_but_imports_secrets() {
     queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
+    let recipient_data_dir = setup_named_test_dir("conflict-recipient");
+    write_vault(&VaultData::new(), password).unwrap();
     std::env::set_current_dir(&recipient).unwrap();
     queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
@@ -994,13 +1031,16 @@ fn test_claim_skips_conflicting_manifest_but_imports_secrets() {
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]
 fn test_claim_project_override_skips_manifest_write() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("override-sender");
 
     let password = "test-Strong-password-42!";
     seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
@@ -1023,6 +1063,8 @@ fn test_claim_project_override_skips_manifest_write() {
     queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
+    let recipient_data_dir = setup_named_test_dir("override-recipient");
+    write_vault(&VaultData::new(), password).unwrap();
     std::env::set_current_dir(&recipient).unwrap();
     queue_test_passwords(&["share-pass", password]);
     let claim = cli::cmd_claim(&bundle_path, Some("renamed-app")).unwrap();
@@ -1040,13 +1082,16 @@ fn test_claim_project_override_skips_manifest_write() {
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]
 fn test_claim_updates_existing_secret_value_instead_of_silently_skipping() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("update-sender");
 
     let password = "test-Strong-password-42!";
     seed_vault(password, "my-app", &[("OPENAI_KEY", "new-value")]);
@@ -1065,6 +1110,7 @@ fn test_claim_updates_existing_secret_value_instead_of_silently_skipping() {
     queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
+    let recipient_data_dir = setup_named_test_dir("update-recipient");
     seed_vault(password, "my-app", &[("OPENAI_KEY", "old-value")]);
     std::env::set_current_dir(&recipient).unwrap();
     queue_test_passwords(&["share-pass", password]);
@@ -1087,7 +1133,10 @@ fn test_claim_updates_existing_secret_value_instead_of_silently_skipping() {
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]
@@ -1124,7 +1173,7 @@ fn test_claim_updates_live_daemon_state() {
     if !unix_sockets_available() {
         return;
     }
-    setup_test_dir();
+    let sender_data_dir = setup_named_test_dir("daemon-sender");
 
     let password = "test-Strong-password-42!";
     seed_vault(password, "my-app", &[("OPENAI_KEY", "new-value")]);
@@ -1143,6 +1192,7 @@ fn test_claim_updates_live_daemon_state() {
     queue_test_passwords(&["share-pass", password]);
     cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
 
+    let recipient_data_dir = setup_named_test_dir("daemon-recipient");
     let daemon = spawn_real_daemon(
         VaultData {
             version: 1,
@@ -1181,7 +1231,10 @@ fn test_claim_updates_live_daemon_state() {
     std::env::set_current_dir(original_cwd).unwrap();
     let _ = fs::remove_dir_all(&sender);
     let _ = fs::remove_dir_all(&recipient);
-    cleanup_test_dir();
+    cleanup_named_test_dir(&sender_data_dir);
+    cleanup_named_test_dir(&recipient_data_dir);
+    unsafe { std::env::remove_var("LOKALVAULT_DATA_DIR") };
+    unsafe { std::env::remove_var("LOKALVAULT_TEST_PIN_APPROVAL") };
 }
 
 #[test]

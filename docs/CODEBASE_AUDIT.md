@@ -145,6 +145,7 @@ It is intended to drive implementation work, not just record findings.
   but still share one process-wide `LOKALVAULT_DATA_DIR`.
 - Impact: the tests can pass without proving claim works against a truly separate
   recipient vault.
+- Status: `fixed on current branch`
 - Planned fix phase: `Phase 4`
 
 ## Low

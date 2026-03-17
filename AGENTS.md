@@ -71,4 +71,3 @@ Recommended flow for shared or security-sensitive changes:
 
 - **Full error type unification (Phase 1C):** `vault_ops.rs` now returns `AppError` internally, but callers in `cli.rs` and `daemon.rs` convert back to `String` at module boundaries via `.map_err(|e| e.to_string())`. Phase 1C should propagate `AppError` end-to-end and eliminate the `Result<_, String>` return types from CLI and daemon functions.
 - **Action-token approval boundary:** sensitive daemon routes now require scoped single-use action tokens and a daemon-tracked approval record, but same-UID clients can still self-drive that approval flow over IPC. Phase 3 follow-up should move approval proof behind a daemon-owned human-verification boundary.
-- **Handoff test isolation:** current share/claim end-to-end coverage is strong on behavior, but sender and recipient still share one process-wide data dir. Phase 4 follow-up should split those fixtures so the tests prove isolated vault handoff semantics.

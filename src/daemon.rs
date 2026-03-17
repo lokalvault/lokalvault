@@ -1854,8 +1854,7 @@ mod tests {
     #[test]
     fn test_sensitive_ipc_rejects_wrong_scope_action_token() {
         let state = sample_daemon_state();
-        let action_token =
-            approved_action_token(&state, 777, 501, "secret_export", "my-app");
+        let action_token = approved_action_token(&state, 777, 501, "secret_export", "my-app");
 
         let error = handle_ipc_request(
             &state,
