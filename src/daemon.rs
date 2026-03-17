@@ -2025,6 +2025,122 @@ mod tests {
     }
 
     #[test]
+    fn test_approval_proof_rejects_wrong_project() {
+        let state = sample_daemon_state();
+        let approval_proof = action_approval_proof(&state, 777, 501, "secret_read", "my-app");
+
+        let error = consume_action_approval_proof(
+            &state,
+            &approval_proof,
+            501,
+            777,
+            ActionScope::SecretRead,
+            Some("other-app"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "approval proof project mismatch");
+    }
+
+    #[test]
+    fn test_approval_proof_is_single_use_for_action_token_minting() {
+        let state = sample_daemon_state();
+        let approval_proof = action_approval_proof(&state, 777, 501, "secret_read", "my-app");
+
+        let first = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_action_token",
+                "scope": "secret_read",
+                "project": "my-app",
+                "approval_proof": approval_proof,
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+        assert_eq!(first["ok"], true);
+
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_action_token",
+                "scope": "secret_read",
+                "project": "my-app",
+                "approval_proof": approval_proof,
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "approval proof invalid");
+    }
+
+    #[test]
+    fn test_submit_action_approval_denial_consumes_session() {
+        let state = sample_daemon_state();
+        let approval = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "create_action_approval",
+                "scope": "secret_read",
+                "project": "my-app",
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+        let approval_id = approval["approval_id"].as_str().unwrap().to_string();
+
+        let denied = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "submit_action_approval",
+                "approval_id": approval_id,
+                "approved": false,
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+        assert_eq!(denied, "approval denied");
+
+        let retry = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "submit_action_approval",
+                "approval_id": approval_id,
+                "approved": true,
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+        assert_eq!(retry, "approval request invalid");
+    }
+
+    #[test]
+    fn test_legacy_approve_action_request_route_is_rejected() {
+        let state = sample_daemon_state();
+
+        let response = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "approve_action_request",
+                "approval_id": "obsolete",
+                "approved": true,
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"], "unsupported request type");
+    }
+
+    #[test]
     fn test_register_token_phase2_route_requires_explicit_pid() {
         let state = sample_daemon_state();
         register_token_phase1(&state, "token-1", 501, "my-app").unwrap();

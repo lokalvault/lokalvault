@@ -410,6 +410,43 @@ fn test_audit_log_records_daemon_access() {
 }
 
 #[test]
+fn test_cli_sensitive_commands_work_via_approval_proof_flow() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !unix_sockets_available() {
+        return;
+    }
+    setup_test_dir();
+
+    let daemon = spawn_real_daemon(
+        VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("initial-value".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        },
+        "password",
+    );
+
+    let value = cli::cmd_get(Some("my-app"), "OPENAI_KEY").unwrap();
+    assert_eq!(value, "initial-value");
+
+    let update = cli::cmd_update(Some("my-app"), "OPENAI_KEY", Some("updated-value")).unwrap();
+    assert!(update.contains("Updated OPENAI_KEY"));
+
+    let refreshed = cli::cmd_get(Some("my-app"), "OPENAI_KEY").unwrap();
+    assert_eq!(refreshed, "updated-value");
+
+    shutdown_real_daemon(daemon);
+    cleanup_test_dir();
+}
+
+#[test]
 fn test_config_set_and_get() {
     let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     setup_test_dir();
