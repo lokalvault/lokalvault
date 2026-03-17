@@ -96,17 +96,18 @@ fn register_action_token(scope: &str, project: &str) -> String {
     .unwrap();
     let approval_id = approval["approval_id"].as_str().unwrap();
     let approval = send_ipc_request(json!({
-        "type": "approve_action_request",
+        "type": "submit_action_approval",
         "approval_id": approval_id,
         "approved": true,
     }))
     .unwrap();
     assert_eq!(approval["ok"], true);
+    let approval_proof = approval["approval_proof"].as_str().unwrap();
     let response = send_ipc_request(json!({
         "type": "register_action_token",
         "scope": scope,
         "project": project,
-        "approval_id": approval_id,
+        "approval_proof": approval_proof,
     }))
     .unwrap();
     response["action_token"].as_str().unwrap().to_string()

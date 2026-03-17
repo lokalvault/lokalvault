@@ -1349,27 +1349,30 @@ fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, 
         .ok_or_else(|| "daemon response missing approval_id".to_string())
 }
 
-fn resolve_action_approval(approval_id: &str, approved: bool) -> Result<(), String> {
+fn submit_terminal_action_approval(approval_id: &str, approved: bool) -> Result<String, String> {
     let response = send_ipc_request(json!({
-        "type": "approve_action_request",
+        "type": "submit_action_approval",
         "approval_id": approval_id,
         "approved": approved,
     }))?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok(());
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
     }
-    Err(response_error(&response))
+    response["approval_proof"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| "daemon response missing approval_proof".to_string())
 }
 
 fn register_action_token(
     scope: &str,
     project: Option<&str>,
-    approval_id: &str,
+    approval_proof: &str,
 ) -> Result<String, String> {
     let mut request = json!({
         "type": "register_action_token",
         "scope": scope,
-        "approval_id": approval_id,
+        "approval_proof": approval_proof,
     });
     if let Some(project) = project {
         request["project"] = serde_json::Value::String(project.to_string());
@@ -1393,20 +1396,21 @@ fn send_sensitive_ipc_request(
     let approval_project = project.unwrap_or("lokalvault");
     let approval_id = create_action_approval(scope, project)?;
     let approved = crate::run_cmd::show_pin_dialog(approval_project, action_preview)?;
-    resolve_action_approval(&approval_id, approved)?;
     if !approved {
+        let _ = submit_terminal_action_approval(&approval_id, false);
         return Err(format!("approval denied for {action_preview}"));
     }
-    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_id)
+    let approval_proof = submit_terminal_action_approval(&approval_id, true)?;
+    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_proof)
 }
 
 fn send_sensitive_ipc_request_with_approval(
     mut request: serde_json::Value,
     scope: &str,
     project: Option<&str>,
-    approval_id: &str,
+    approval_proof: &str,
 ) -> Result<serde_json::Value, String> {
-    let action_token = register_action_token(scope, project, approval_id)?;
+    let action_token = register_action_token(scope, project, approval_proof)?;
     request["action_token"] = serde_json::Value::String(action_token);
     send_ipc_request(request)
 }
