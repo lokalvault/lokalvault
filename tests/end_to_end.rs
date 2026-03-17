@@ -1197,7 +1197,7 @@ fn test_share_refuses_to_overwrite_existing_bundle() {
     queue_test_passwords(&["share-pass"]);
     let error = cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap_err();
 
-    assert!(error.contains("refusing to overwrite"));
+    assert!(error.to_string().contains("refusing to overwrite"));
     unsafe { std::env::remove_var("LOKALVAULT_TEST_PASSWORDS") };
 
     std::env::set_current_dir(original_cwd).unwrap();

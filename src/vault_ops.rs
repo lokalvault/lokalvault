@@ -38,7 +38,7 @@ pub fn create_vault(password: &str) -> Result<(), AppError> {
 }
 
 pub fn unlock_vault(password: &str) -> Result<VaultData, AppError> {
-    Ok(read_vault(password)?)
+    read_vault(password)
 }
 
 pub fn lock_vault(vault: &mut VaultData) {

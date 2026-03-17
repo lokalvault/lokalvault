@@ -191,7 +191,9 @@ pub fn read_vault(password: &str) -> Result<VaultData, AppError> {
         ));
     }
     if &bytes[0..4] != MAGIC {
-        return Err(AppError::VaultCorrupted("not a LokalVault file".to_string()));
+        return Err(AppError::VaultCorrupted(
+            "not a LokalVault file".to_string(),
+        ));
     }
     if bytes[4] != VERSION {
         return Err(AppError::UnsupportedVaultVersion(bytes[4]));
@@ -202,9 +204,7 @@ pub fn read_vault(password: &str) -> Result<VaultData, AppError> {
         .map_err(|_| AppError::VaultCorrupted("vault file corrupted: invalid salt".to_string()))?;
     let nonce: [u8; 12] = bytes[37..49]
         .try_into()
-        .map_err(|_| {
-            AppError::VaultCorrupted("vault file corrupted: invalid nonce".to_string())
-        })?;
+        .map_err(|_| AppError::VaultCorrupted("vault file corrupted: invalid nonce".to_string()))?;
     let ciphertext: &[u8] = &bytes[49..];
 
     let settings = read_settings();

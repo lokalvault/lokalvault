@@ -105,6 +105,8 @@ impl fmt::Display for AppError {
     }
 }
 
+impl std::error::Error for AppError {}
+
 impl From<std::io::Error> for AppError {
     fn from(error: std::io::Error) -> Self {
         Self::IoError(error.to_string())
@@ -120,12 +122,6 @@ impl From<serde_json::Error> for AppError {
 impl From<String> for AppError {
     fn from(error: String) -> Self {
         Self::IoError(error)
-    }
-}
-
-impl From<AppError> for String {
-    fn from(error: AppError) -> Self {
-        error.to_string()
     }
 }
 
@@ -191,7 +187,10 @@ mod tests {
     #[test]
     fn test_from_daemon_response_maps_known_error() {
         let response = serde_json::json!({ "ok": false, "error": "token invalid" });
-        assert_eq!(AppError::from_daemon_response(&response), AppError::TokenInvalid);
+        assert_eq!(
+            AppError::from_daemon_response(&response),
+            AppError::TokenInvalid
+        );
     }
 
     #[test]

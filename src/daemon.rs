@@ -303,7 +303,10 @@ pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> Da
 pub fn stop_daemon(state: &DaemonState) -> Result<(), AppError> {
     invalidate_all_tokens(state)?;
 
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     vault.zeroize();
     drop(vault);
 
@@ -557,7 +560,10 @@ pub fn upsert_secret(
     value: &str,
 ) -> Result<(), AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
 
     if !candidate.projects.iter().any(|entry| entry.name == project) {
@@ -593,7 +599,10 @@ pub fn import_dotenv_into_state(
     path: &Path,
 ) -> Result<crate::vault_ops::ImportResult, AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
 
     if !candidate.projects.iter().any(|entry| entry.name == project) {
@@ -607,7 +616,10 @@ pub fn import_dotenv_into_state(
 }
 
 pub fn project_count(state: &DaemonState) -> Result<usize, AppError> {
-    let vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     Ok(vault.projects.len())
 }
 
@@ -628,12 +640,18 @@ pub fn get_secret_value_for_boundary(
 }
 
 pub fn list_project_summaries(state: &DaemonState) -> Result<Vec<ProjectSummary>, AppError> {
-    let vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     Ok(list_projects(&vault))
 }
 
 pub fn list_project_keys(state: &DaemonState, project: &str) -> Result<Vec<String>, AppError> {
-    let vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     list_secret_keys(&vault, project)
 }
 
@@ -679,7 +697,10 @@ fn with_project_ref<T, F>(state: &DaemonState, project: &str, f: F) -> Result<T,
 where
     F: FnOnce(&crate::vault_file::Project) -> T,
 {
-    let vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let project_data = vault
         .projects
         .iter()
@@ -705,7 +726,10 @@ pub fn delete_secret_from_state(
     key: &str,
 ) -> Result<(), AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
     delete_secret(&mut candidate, project, key)?;
     crate::vault_file::write_vault(&candidate, &password)?;
@@ -715,7 +739,10 @@ pub fn delete_secret_from_state(
 
 pub fn delete_project_from_state(state: &DaemonState, project: &str) -> Result<(), AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
     delete_project(&mut candidate, project)?;
     crate::vault_file::write_vault(&candidate, &password)?;
@@ -730,7 +757,10 @@ pub fn update_secret_in_state(
     value: &str,
 ) -> Result<(), AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
     update_secret(&mut candidate, project, key, value)?;
     crate::vault_file::write_vault(&candidate, &password)?;
@@ -744,7 +774,10 @@ fn upsert_secrets_batch_in_state(
     secrets: &[(String, String)],
 ) -> Result<(usize, usize), AppError> {
     let password = get_password(state)?;
-    let mut vault = state.vault.lock().map_err(|e| daemon_ipc_error(e.to_string()))?;
+    let mut vault = state
+        .vault
+        .lock()
+        .map_err(|e| daemon_ipc_error(e.to_string()))?;
     let mut candidate = vault.clone();
 
     if !candidate.projects.iter().any(|entry| entry.name == project) {
@@ -1258,10 +1291,7 @@ async fn write_json_response(
         .map_err(|e| daemon_ipc_error(e.to_string()))
 }
 
-fn require_str_field<'a>(
-    request: &'a serde_json::Value,
-    field: &str,
-) -> Result<&'a str, AppError> {
+fn require_str_field<'a>(request: &'a serde_json::Value, field: &str) -> Result<&'a str, AppError> {
     request
         .get(field)
         .and_then(serde_json::Value::as_str)
@@ -1274,7 +1304,11 @@ async fn handle_connection(state: &DaemonState, stream: &mut UnixStream) -> Resu
     let current_uid = unsafe { libc::geteuid() };
     if uid != current_uid {
         eprintln!("Warning: rejected connection from uid {uid}");
-        write_json_response(stream, &json!({ "ok": false, "error": "permission denied" })).await?;
+        write_json_response(
+            stream,
+            &json!({ "ok": false, "error": "permission denied" }),
+        )
+        .await?;
         return Ok(false);
     }
 
@@ -1498,7 +1532,8 @@ fn handle_ipc_request(
             let child_pid = request
                 .get("pid")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| daemon_validation_error("missing pid"))? as u32;
+                .ok_or_else(|| daemon_validation_error("missing pid"))?
+                as u32;
             if child_pid == 0 {
                 return Err(daemon_validation_error("invalid pid"));
             }
@@ -1899,7 +1934,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error, AppError::ValidationError("missing action_token".to_string()));
+        assert_eq!(
+            error,
+            AppError::ValidationError("missing action_token".to_string())
+        );
     }
 
     #[test]
@@ -2117,7 +2155,10 @@ mod tests {
             501,
         )
         .unwrap_err();
-        assert_eq!(denied, AppError::ApprovalDenied("approval denied".to_string()));
+        assert_eq!(
+            denied,
+            AppError::ApprovalDenied("approval denied".to_string())
+        );
 
         let retry = handle_ipc_request(
             &state,

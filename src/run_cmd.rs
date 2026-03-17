@@ -4,6 +4,7 @@ use crate::daemon::{
     fetch_all_secrets_for_pending_boundary as fetch_all_secrets_pending, poc_socket_path,
     register_token_phase1, register_token_phase2,
 };
+use crate::errors::AppError;
 use crate::ipc_client::send_ipc_request;
 use crate::settings::read_settings;
 use crate::vault_file::get_vault_path;
@@ -25,6 +26,17 @@ use tokio::sync::watch;
 static TEST_SHELL_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 const TEST_PIN_APPROVAL_ENV: &str = "LOKALVAULT_TEST_PIN_APPROVAL";
 
+fn runtime_validation_error(message: impl Into<String>) -> AppError {
+    AppError::ValidationError(message.into())
+}
+
+fn daemon_response_error(response: &serde_json::Value) -> AppError {
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+        return AppError::from_daemon_response(response);
+    }
+    AppError::InvalidResponse("unknown daemon error".to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectSection {
     pub name: String,
@@ -43,7 +55,7 @@ pub struct ProjectConfig {
     pub keys: KeysSection,
 }
 
-pub async fn cmd_run_poc(command: Vec<String>) -> Result<std::process::ExitStatus, String> {
+pub async fn cmd_run_poc(command: Vec<String>) -> Result<std::process::ExitStatus, AppError> {
     let socket_path = poc_socket_path();
     let socket_path = socket_path.to_string_lossy().to_string();
     cmd_run_poc_with_socket(command, &socket_path).await
@@ -53,20 +65,21 @@ pub async fn cmd_run(
     state: &DaemonState,
     project: Option<&str>,
     command: Vec<String>,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if command.is_empty() {
-        return Err("command cannot be empty".to_string());
+        return Err(runtime_validation_error("command cannot be empty"));
     }
 
     let project_name = match project {
         Some(name) => name.to_string(),
-        None => get_project_from_config()?
-            .ok_or_else(|| "run lokalvault init first or pass --project".to_string())?,
+        None => get_project_from_config()?.ok_or_else(|| {
+            runtime_validation_error("run lokalvault init first or pass --project")
+        })?,
     };
 
     let command_preview = command.join(" ");
     if !show_pin_dialog(&project_name, &command_preview)? {
-        return Err("run approval denied".to_string());
+        return Err(runtime_validation_error("run approval denied"));
     }
 
     let token = generate_token();
@@ -87,7 +100,9 @@ pub async fn cmd_run(
         &project_name,
         &socket_path.display().to_string(),
     );
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
     let child_pid = child.id();
 
     let timeout_minutes = read_settings().session_timeout_minutes as u64;
@@ -97,35 +112,43 @@ pub async fn cmd_run(
         child_pid,
         Duration::from_secs(timeout_minutes * 60),
     )?;
-    child.wait().map_err(|e| e.to_string())
+    child
+        .wait()
+        .map_err(|e| AppError::ProcessError(e.to_string()))
 }
 
 pub async fn cmd_run_unified(
     state: Option<&DaemonState>,
     project: Option<&str>,
     command: Vec<String>,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if let Some(state) = state {
         return cmd_run(state, project, command).await;
     }
 
     if project.is_some() {
-        return Err("vault is locked; run `lokalvault unlock` first".to_string());
+        return Err(runtime_validation_error(
+            "vault is locked; run `lokalvault unlock` first",
+        ));
     }
 
     if get_project_from_config()?.is_some() {
-        return Err("vault is locked; run `lokalvault unlock` first".to_string());
+        return Err(runtime_validation_error(
+            "vault is locked; run `lokalvault unlock` first",
+        ));
     }
 
     if get_vault_path().exists() {
-        return Err("run lokalvault init first or pass --project".to_string());
+        return Err(runtime_validation_error(
+            "run lokalvault init first or pass --project",
+        ));
     }
 
     match cmd_run_poc(command).await {
         Ok(status) => Ok(status),
-        Err(error) if error.contains("No such file or directory") => {
-            Err("run lokalvault init first or pass --project".to_string())
-        }
+        Err(error) if error.to_string().contains("No such file or directory") => Err(
+            runtime_validation_error("run lokalvault init first or pass --project"),
+        ),
         Err(error) => Err(error),
     }
 }
@@ -134,7 +157,7 @@ pub async fn cmd_run_entry(
     project: Option<&str>,
     command: Vec<String>,
     watch_mode: bool,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if watch_mode {
         return cmd_run_watch(project, command).await;
     }
@@ -149,25 +172,31 @@ pub async fn cmd_run_entry(
     }
 
     if crate::ipc_client::is_daemon_running() && resolved_project.is_none() {
-        return Err("run lokalvault init first or pass --project".to_string());
+        return Err(runtime_validation_error(
+            "run lokalvault init first or pass --project",
+        ));
     }
 
     if !crate::ipc_client::is_daemon_running() && resolved_project.is_none() {
         return match cmd_run_poc(command).await {
             Ok(status) => Ok(status),
-            Err(error) if error.contains("No such file or directory") => {
-                Err("run lokalvault init first or pass --project".to_string())
-            }
+            Err(error) if error.to_string().contains("No such file or directory") => Err(
+                runtime_validation_error("run lokalvault init first or pass --project"),
+            ),
             Err(error) => Err(error),
         };
     }
 
     if !crate::ipc_client::is_daemon_running() && project.is_some() {
-        return Err("vault is locked - run lokalvault unlock first".to_string());
+        return Err(runtime_validation_error(
+            "vault is locked - run lokalvault unlock first",
+        ));
     }
 
     if resolved_project.is_some() {
-        return Err("vault is locked - run lokalvault unlock first".to_string());
+        return Err(runtime_validation_error(
+            "vault is locked - run lokalvault unlock first",
+        ));
     }
 
     cmd_run_unified(None, resolved_project.as_deref(), command).await
@@ -176,9 +205,9 @@ pub async fn cmd_run_entry(
 async fn cmd_run_watch(
     project: Option<&str>,
     command: Vec<String>,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if command.is_empty() {
-        return Err("command cannot be empty".to_string());
+        return Err(runtime_validation_error("command cannot be empty"));
     }
 
     let (tx, mut rx) = watch::channel(false);
@@ -196,20 +225,21 @@ async fn cmd_run_watch(
     }
 }
 
-pub fn read_project_config() -> Result<Option<ProjectConfig>, String> {
+pub fn read_project_config() -> Result<Option<ProjectConfig>, AppError> {
     let path = PathBuf::from(".lokalvault");
     if !path.exists() {
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let config: ProjectConfig = toml::from_str(&contents).map_err(|e| e.to_string())?;
+    let contents = fs::read_to_string(path)?;
+    let config: ProjectConfig = toml::from_str(&contents)?;
     Ok(Some(config))
 }
 
-pub fn write_project_config(config: &ProjectConfig) -> Result<(), String> {
-    let contents = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(".lokalvault", contents).map_err(|e| e.to_string())
+pub fn write_project_config(config: &ProjectConfig) -> Result<(), AppError> {
+    let contents = toml::to_string_pretty(config)?;
+    fs::write(".lokalvault", contents)?;
+    Ok(())
 }
 
 pub fn merge_project_config_manifest(
@@ -251,9 +281,9 @@ fn dedupe_in_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
 async fn run_with_real_daemon(
     project: &str,
     command: Vec<String>,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if command.is_empty() {
-        return Err("command cannot be empty".to_string());
+        return Err(runtime_validation_error("command cannot be empty"));
     }
 
     let token = generate_token();
@@ -263,10 +293,7 @@ async fn run_with_real_daemon(
         "project": project,
     }))?;
     if phase1.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(phase1["error"]
-            .as_str()
-            .unwrap_or("token registration failed")
-            .to_string());
+        return Err(daemon_response_error(&phase1));
     }
 
     let secrets_response = send_ipc_request(serde_json::json!({
@@ -275,7 +302,7 @@ async fn run_with_real_daemon(
     }))?;
     let secrets = secrets_response["secrets"]
         .as_object()
-        .ok_or_else(|| "daemon response missing secrets".to_string())?
+        .ok_or_else(|| AppError::InvalidResponse("daemon response missing secrets".to_string()))?
         .iter()
         .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
         .collect::<HashMap<_, _>>();
@@ -291,10 +318,10 @@ async fn run_with_real_daemon(
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            return Err(format!(
+            return Err(runtime_validation_error(format!(
                 "Missing required secrets for project {project}: {}",
                 missing.join(", ")
-            ));
+            )));
         }
     }
 
@@ -310,7 +337,9 @@ async fn run_with_real_daemon(
         project,
         &socket_path.display().to_string(),
     );
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
 
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
@@ -318,16 +347,13 @@ async fn run_with_real_daemon(
         "pid": child.id(),
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(phase2["error"]
-            .as_str()
-            .unwrap_or("token activation failed")
-            .to_string());
+        return Err(daemon_response_error(&phase2));
     }
 
     wait_with_signal_passthrough(&mut child, None).await
 }
 
-pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
+pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, AppError> {
     #[cfg(debug_assertions)]
     if let Ok(value) = std::env::var(TEST_PIN_APPROVAL_ENV) {
         let normalized = value.trim().to_ascii_lowercase();
@@ -342,16 +368,14 @@ pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, St
     use rand::Rng;
     let code = format!("{:02}", rand::thread_rng().gen_range(0u8..=99));
     print!("Type [{code}] to allow access to '{project}': ");
-    io::stdout().flush().map_err(|e| e.to_string())?;
+    io::stdout().flush()?;
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| e.to_string())?;
+    io::stdin().read_line(&mut input).map_err(AppError::from)?;
     Ok(input.trim() == code)
 }
 
-pub fn get_project_from_config() -> Result<Option<String>, String> {
+pub fn get_project_from_config() -> Result<Option<String>, AppError> {
     if let Some(config) = read_project_config()?
         && !config.project.name.is_empty()
     {
@@ -400,24 +424,26 @@ pub fn fetch_all_secrets(
     token: &str,
     pid: u32,
     uid: u32,
-) -> Result<HashMap<String, String>, String> {
-    fetch_all_secrets_from_state(state, token, pid, uid).map_err(|e| e.message())
+) -> Result<HashMap<String, String>, AppError> {
+    fetch_all_secrets_from_state(state, token, pid, uid)
+        .map_err(|e| AppError::from_daemon_message(&e.message()))
 }
 
 pub fn fetch_all_secrets_pending_wrapper(
     state: &DaemonState,
     token: &str,
     uid: u32,
-) -> Result<HashMap<String, String>, String> {
-    fetch_all_secrets_pending(state, token, uid).map_err(|e| e.message())
+) -> Result<HashMap<String, String>, AppError> {
+    fetch_all_secrets_pending(state, token, uid)
+        .map_err(|e| AppError::from_daemon_message(&e.message()))
 }
 
 async fn cmd_run_poc_with_socket(
     command: Vec<String>,
     socket_path: &str,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     if command.is_empty() {
-        return Err("command cannot be empty".to_string());
+        return Err(runtime_validation_error("command cannot be empty"));
     }
 
     let secret_value = fetch_poc_secret(socket_path).await?;
@@ -428,11 +454,13 @@ async fn cmd_run_poc_with_socket(
     }
 
     cmd.env("OPENAI_KEY", secret_value);
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
     wait_with_signal_passthrough(&mut child, None).await
 }
 
-async fn spawn_run_child(project: Option<&str>, command: &[String]) -> Result<Child, String> {
+async fn spawn_run_child(project: Option<&str>, command: &[String]) -> Result<Child, AppError> {
     let resolved_project = match project {
         Some(project) => Some(project.to_string()),
         None => get_project_from_config()?,
@@ -446,7 +474,7 @@ async fn spawn_run_child(project: Option<&str>, command: &[String]) -> Result<Ch
     spawn_poc_child(command.to_vec()).await
 }
 
-async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<Child, String> {
+async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<Child, AppError> {
     let token = generate_token();
     let phase1 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase1",
@@ -454,10 +482,7 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
         "project": project,
     }))?;
     if phase1.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(phase1["error"]
-            .as_str()
-            .unwrap_or("token registration failed")
-            .to_string());
+        return Err(daemon_response_error(&phase1));
     }
 
     let secrets_response = send_ipc_request(serde_json::json!({
@@ -466,7 +491,7 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
     }))?;
     let secrets = secrets_response["secrets"]
         .as_object()
-        .ok_or_else(|| "daemon response missing secrets".to_string())?
+        .ok_or_else(|| AppError::InvalidResponse("daemon response missing secrets".to_string()))?
         .iter()
         .map(|(key, value)| (key.clone(), value.as_str().unwrap_or("").to_string()))
         .collect::<HashMap<_, _>>();
@@ -483,7 +508,9 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
         project,
         &socket_path.display().to_string(),
     );
-    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
 
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
@@ -491,16 +518,13 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
         "pid": child.id(),
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(phase2["error"]
-            .as_str()
-            .unwrap_or("token activation failed")
-            .to_string());
+        return Err(daemon_response_error(&phase2));
     }
 
     Ok(child)
 }
 
-async fn spawn_poc_child(command: Vec<String>) -> Result<Child, String> {
+async fn spawn_poc_child(command: Vec<String>) -> Result<Child, AppError> {
     let socket_path = poc_socket_path();
     let socket_path = socket_path.to_string_lossy().to_string();
     let secret_value = fetch_poc_secret(&socket_path).await?;
@@ -509,19 +533,23 @@ async fn spawn_poc_child(command: Vec<String>) -> Result<Child, String> {
         cmd.args(&command[1..]);
     }
     cmd.env("OPENAI_KEY", secret_value);
-    cmd.spawn().map_err(|e| e.to_string())
+    cmd.spawn()
+        .map_err(|e| AppError::ProcessError(e.to_string()))
 }
 
 async fn wait_with_signal_passthrough(
     child: &mut Child,
     mut watch_rx: Option<&mut watch::Receiver<bool>>,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, AppError> {
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
 
     loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| AppError::ProcessError(e.to_string()))?
+        {
             return Ok(status);
         }
 
@@ -529,7 +557,9 @@ async fn wait_with_signal_passthrough(
             && rx.has_changed().unwrap_or(false)
         {
             forward_terminate(child)?;
-            return child.wait().map_err(|e| e.to_string());
+            return child
+                .wait()
+                .map_err(|e| AppError::ProcessError(e.to_string()));
         }
 
         #[cfg(unix)]
@@ -548,29 +578,35 @@ async fn wait_with_signal_passthrough(
         {
             let _ = rx.borrow_and_update();
             forward_terminate(child)?;
-            return child.wait().map_err(|e| e.to_string());
+            return child
+                .wait()
+                .map_err(|e| AppError::ProcessError(e.to_string()));
         }
     }
 }
 
 #[cfg(unix)]
-fn forward_interrupt(child: &Child) -> Result<(), String> {
+fn forward_interrupt(child: &Child) -> Result<(), AppError> {
     let rc = unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
     if rc == 0 {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error().to_string())
+        Err(AppError::ProcessError(
+            std::io::Error::last_os_error().to_string(),
+        ))
     }
 }
 
-fn forward_terminate(child: &Child) -> Result<(), String> {
+fn forward_terminate(child: &Child) -> Result<(), AppError> {
     #[cfg(unix)]
     {
         let rc = unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
         if rc == 0 {
             return Ok(());
         }
-        Err(std::io::Error::last_os_error().to_string())
+        Err(AppError::ProcessError(
+            std::io::Error::last_os_error().to_string(),
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -579,7 +615,9 @@ fn forward_terminate(child: &Child) -> Result<(), String> {
     }
 }
 
-fn start_watch_thread(tx: watch::Sender<bool>) -> Result<Arc<notify::RecommendedWatcher>, String> {
+fn start_watch_thread(
+    tx: watch::Sender<bool>,
+) -> Result<Arc<notify::RecommendedWatcher>, AppError> {
     use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
     let mut watcher = RecommendedWatcher::new(
@@ -595,17 +633,17 @@ fn start_watch_thread(tx: watch::Sender<bool>) -> Result<Arc<notify::Recommended
         },
         Config::default(),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| AppError::ProcessError(e.to_string()))?;
     watcher
         .watch(std::path::Path::new("."), RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::ProcessError(e.to_string()))?;
     Ok(Arc::new(watcher))
 }
 
-async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
+async fn fetch_poc_secret(socket_path: &str) -> Result<String, AppError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::IpcError(e.to_string()))?;
 
     let request = serde_json::json!({
         "type": "get_secret",
@@ -617,29 +655,34 @@ async fn fetch_poc_secret(socket_path: &str) -> Result<String, String> {
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|e| e.to_string())?;
-    stream.shutdown().await.map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::IpcError(e.to_string()))?;
+    stream
+        .shutdown()
+        .await
+        .map_err(|e| AppError::IpcError(e.to_string()))?;
 
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::IpcError(e.to_string()))?;
 
-    let response_json: serde_json::Value =
-        serde_json::from_slice(&response).map_err(|e| e.to_string())?;
+    let response_json: serde_json::Value = serde_json::from_slice(&response)
+        .map_err(|e| AppError::InvalidResponse(format!("daemon returned invalid JSON: {e}")))?;
     if let Some(error) = response_json
         .get("error")
         .and_then(serde_json::Value::as_str)
     {
-        return Err(error.to_string());
+        return Err(AppError::from_daemon_message(error));
     }
 
     response_json
         .get("value")
         .and_then(serde_json::Value::as_str)
         .map(|value| value.to_string())
-        .ok_or_else(|| "daemon response missing secret value".to_string())
+        .ok_or_else(|| {
+            AppError::InvalidResponse("daemon response missing secret value".to_string())
+        })
 }
 
 #[cfg(test)]
@@ -796,7 +839,7 @@ mod tests {
         let state = start_daemon(VaultData::default());
         let error = fetch_all_secrets(&state, "missing-token", 0, 501).unwrap_err();
 
-        assert_eq!(error, "token invalid");
+        assert_eq!(error, AppError::TokenInvalid);
     }
 
     #[test]

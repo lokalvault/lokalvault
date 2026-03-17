@@ -26,8 +26,8 @@ pub fn send_ipc_request(request: Value) -> Result<Value, AppError> {
 }
 
 fn send_ipc_request_to_path(socket_path: &Path, request: Value) -> Result<Value, AppError> {
-    cleanup_stale_socket_path(&socket_path);
-    let mut stream = connect_socket(&socket_path).map_err(|error| match error.kind() {
+    cleanup_stale_socket_path(socket_path);
+    let mut stream = connect_socket(socket_path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => AppError::DaemonNotRunning,
         _ => AppError::IpcError(error.to_string()),
     })?;
@@ -130,7 +130,11 @@ mod tests {
         let error = send_ipc_request_to_path(&socket_path, serde_json::json!({ "type": "ping" }))
             .unwrap_err();
         assert!(matches!(error, AppError::InvalidResponse(_)));
-        assert!(error.to_string().starts_with("daemon returned invalid JSON:"));
+        assert!(
+            error
+                .to_string()
+                .starts_with("daemon returned invalid JSON:")
+        );
         server.join().unwrap();
     }
 }
