@@ -1,8 +1,12 @@
-use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
-use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
+use crate::audit_log::{
+    AccessEvent, AuditFilter, clear_audit_log, log_access_event, read_audit_log,
+};
+use crate::ipc_client::{
+    cleanup_stale_socket, get_socket_path, is_daemon_running, send_ipc_request,
+};
 use crate::run_cmd::{
     ProjectConfig, configure_interactive_shell, get_project_from_config, inject_secrets_into_env,
-    read_project_config, shell_program, write_project_config,
+    merge_project_config_manifest, read_project_config, shell_program, write_project_config,
 };
 use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
@@ -11,8 +15,9 @@ use crate::vault_ops::{
     list_projects, list_secret_keys, unlock_vault, update_secret,
 };
 use rpassword::read_password;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -22,15 +27,66 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
-#[cfg(test)]
-static TEST_PASSWORDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
-
 const LOKALVAULT_MANAGED_AGENTS_MARKER: &str = "<!-- lokalvault-managed:agents -->";
+const SHARE_BUNDLE_SENTINEL_KEY: &str = "__share_bundle__";
+const SHARE_BUNDLE_CREATED_METHOD: &str = "share_bundle_created";
+const SHARE_BUNDLE_CLAIMED_METHOD: &str = "share_bundle_claimed";
+const SHARE_BUNDLE_EXPORT_METHOD: &str = "share_bundle_export";
+const TEST_PASSWORD_ENV: &str = "LOKALVAULT_TEST_PASSWORDS";
+const ACTION_SCOPE_SECRET_READ: &str = "secret_read";
+const ACTION_SCOPE_SECRET_EXPORT: &str = "secret_export";
+const ACTION_SCOPE_VAULT_MUTATE: &str = "vault_mutate";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundleManifest {
+    required: Vec<String>,
+    optional: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundleSecret {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundlePayload {
+    project: String,
+    shared_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<ShareBundleManifest>,
+    secrets: Vec<ShareBundleSecret>,
+}
+
+struct ClaimImportResult {
+    added: usize,
+    updated: usize,
+}
+
+enum ClaimManifestResult {
+    Wrote,
+    Merged,
+    SkippedConflict,
+    SkippedProjectOverride,
+    NoManifest,
+}
+
+impl ClaimManifestResult {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Wrote => "✓ Wrote .lokalvault",
+            Self::Merged => "✓ Merged .lokalvault",
+            Self::SkippedConflict => "✓ Skipped setup due to conflicting .lokalvault project",
+            Self::SkippedProjectOverride => {
+                "✓ Skipped setup because --project overrides the shared project"
+            }
+            Self::NoManifest => "✓ No project setup metadata in bundle",
+        }
+    }
+}
 
 pub enum ExportFormat {
     Dotenv,
@@ -78,13 +134,8 @@ pub fn prompt_password(prompt: &str) -> Result<String, String> {
     eprint!("{prompt}");
     io::stderr().flush().map_err(|e| e.to_string())?;
 
-    #[cfg(test)]
-    {
-        let passwords = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
-        let mut passwords = passwords.lock().map_err(|e| e.to_string())?;
-        if !passwords.is_empty() {
-            return Ok(passwords.remove(0));
-        }
+    if let Some(password) = take_test_password()? {
+        return Ok(password);
     }
 
     read_password().map_err(|e| e.to_string())
@@ -151,6 +202,7 @@ impl ProjectTemplate {
 }
 
 pub fn cmd_lock() -> Result<String, String> {
+    cleanup_stale_socket();
     if !is_daemon_running() {
         return Ok("Vault already locked.".to_string());
     }
@@ -222,12 +274,17 @@ pub fn cmd_add(
     };
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "add_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("add secret {key} to {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Added {key} to {project}"));
         }
@@ -259,12 +316,17 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     };
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "update_secret",
             "project": project,
             "key": key,
             "value": secret_value,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("update secret {key} in {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Updated {key} in {project}"));
         }
@@ -282,11 +344,16 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "delete_secret",
             "project": project,
             "key": key,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(&project),
+            &format!("delete secret {key} from {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted {key} from {project}"));
         }
@@ -302,10 +369,15 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
 
 pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "delete_project",
             "project": project,
-        }))?;
+            }),
+            ACTION_SCOPE_VAULT_MUTATE,
+            Some(project),
+            &format!("delete project {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(format!("✓ Deleted project {project}"));
         }
@@ -374,14 +446,19 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
-        let response = send_ipc_request(json!({
+        let response = send_sensitive_ipc_request(
+            json!({
             "type": "get_secret",
             "project": project,
             "key": key,
             "process_name": current_process_name(),
             "exe_path": current_exe_path(),
             "method": "cli_get",
-        }))?;
+            }),
+            ACTION_SCOPE_SECRET_READ,
+            Some(&project),
+            &format!("read secret {key} from {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             return Ok(response["value"].as_str().unwrap_or("").to_string());
         }
@@ -422,7 +499,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     }
 
     if is_daemon_running() {
-        let mut imported = 0usize;
+        let mut imported_secrets = Vec::new();
         let mut skipped = 0usize;
         for raw_line in preview.lines() {
             let line = raw_line.trim();
@@ -433,23 +510,17 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
                 skipped += 1;
                 continue;
             };
-            let response = send_ipc_request(json!({
-                "type": "add_secret",
-                "project": project,
-                "key": key.trim(),
-                "value": value.trim(),
-            }))?;
-            if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-                imported += 1;
-            } else {
-                skipped += 1;
-            }
+            imported_secrets.push(ShareBundleSecret {
+                key: key.trim().to_string(),
+                value: value.trim().to_string(),
+            });
         }
+        let import_result = import_bundle_into_daemon(project, &imported_secrets)?;
         let retired_path = retire_import_file(path)?;
         ensure_gitignore_contains(&retired_path)?;
         return Ok(format!(
             "✓ Imported {} secrets into {} (skipped {}) - retired to {}",
-            imported,
+            import_result.added + import_result.updated,
             project,
             skipped,
             retired_path.display()
@@ -866,14 +937,7 @@ pub fn cmd_doctor() -> Result<(String, bool), String> {
 }
 
 pub fn cmd_dev() -> Result<String, String> {
-    let detected = if Path::new(".lokalvault").exists() {
-        vec![
-            "lokalvault".to_string(),
-            "run".to_string(),
-            "--".to_string(),
-            "true".to_string(),
-        ]
-    } else if Path::new("package.json").exists() {
+    let detected = if Path::new("package.json").exists() {
         let package = fs::read_to_string("package.json").map_err(|e| e.to_string())?;
         if package.contains("\"dev\"") {
             vec!["npm".to_string(), "run".to_string(), "dev".to_string()]
@@ -970,7 +1034,7 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
     write_project_config(&config)?;
 
     let agents = format!(
-        "{LOKALVAULT_MANAGED_AGENTS_MARKER}\n# AI Agent Instructions\n\nThis project uses LokalVault for secrets management.\n\nSecrets are NOT in this repository. They cannot be accessed\nwithout the developer typing a confirmation code.\n\n## What You Must Know\n\n- Secret values are never in any file in this repository\n- They are injected at runtime via `lokalvault run`\n- Reference secrets by KEY NAME only: os.environ[\"OPENAI_KEY\"]\n\n## How To Run This Project\n\n  lokalvault run -- <detected run command>\n\n## What You Must Not Do\n\n- Do not read or write vault files (*.lv)\n- Do not connect to /tmp/lokalvault-*.sock\n- Do not hardcode secret values into source files\n- Do not create .env files containing real values\n- Do not replace os.environ[\"KEY\"] calls with literal values\n\n## Required Secrets For This Project\n\n{}\n",
+        "{LOKALVAULT_MANAGED_AGENTS_MARKER}\n# AI Agent Instructions\n\nThis project uses LokalVault for secrets management.\n\nSecrets are NOT in this repository. They cannot be accessed\nwithout the developer typing a confirmation code.\n\n## What You Must Know\n\n- Secret values are never in any file in this repository\n- They are injected at runtime via `lokalvault run`\n- Reference secrets by KEY NAME only: os.environ[\"OPENAI_KEY\"]\n\n## How To Run This Project\n\n  lokalvault run -- <detected run command>\n\n## What You Must Not Do\n\n- Do not read or write vault files (*.lv)\n- Do not connect to the LokalVault runtime socket directly\n- Do not hardcode secret values into source files\n- Do not create .env files containing real values\n- Do not replace os.environ[\"KEY\"] calls with literal values\n\n## Required Secrets For This Project\n\n{}\n",
         keys.iter()
             .map(|key| format!("  {key}"))
             .collect::<Vec<_>>()
@@ -1012,68 +1076,65 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
 }
 
 pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
-    let share_password = prompt_password("Share password: ")?;
-    let secrets = get_project_secret_map(project)?;
-
-    let payload = serde_json::json!({
-        "project": project,
-        "shared_at": chrono::Utc::now().to_rfc3339(),
-        "secrets": secrets
-            .into_iter()
-            .map(|(key, value)| json!({ "key": key, "value": value }))
-            .collect::<Vec<_>>()
-    });
     let output_path = output
         .map(ToString::to_string)
         .unwrap_or_else(|| format!("{project}.lve"));
-    write_lve_file(Path::new(&output_path), &share_password, &payload)?;
-    Ok(format!("✓ Created {output_path}"))
+    if Path::new(&output_path).exists() {
+        return Err(format!(
+            "refusing to overwrite existing file: {output_path}"
+        ));
+    }
+    let share_password = prompt_password("Share password: ")?;
+    let secrets = get_project_secret_map_with_method(project, Some(SHARE_BUNDLE_EXPORT_METHOD))?;
+    let manifest = current_project_manifest(project)?;
+    let payload = ShareBundlePayload {
+        project: project.to_string(),
+        shared_at: chrono::Utc::now().to_rfc3339(),
+        manifest: manifest.clone(),
+        secrets: secrets
+            .into_iter()
+            .map(|(key, value)| ShareBundleSecret { key, value })
+            .collect(),
+    };
+    write_lve_file(
+        Path::new(&output_path),
+        &share_password,
+        &serde_json::to_value(&payload).map_err(|e| e.to_string())?,
+    )?;
+    log_share_bundle_event(project, SHARE_BUNDLE_CREATED_METHOD)?;
+    Ok(format!(
+        "✓ Created {output_path}\n{}",
+        if manifest.is_some() {
+            "✓ Included project setup from .lokalvault"
+        } else {
+            "✓ No matching .lokalvault found; bundle contains secrets only"
+        }
+    ))
 }
 
 pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
     let share_password = prompt_password("Share password: ")?;
-    let payload = read_lve_file(path, &share_password)?;
+    let payload: ShareBundlePayload =
+        serde_json::from_value(read_lve_file(path, &share_password)?).map_err(|e| e.to_string())?;
+    let bundle_project = payload.project.clone();
     let project_name = project
         .map(ToString::to_string)
-        .or_else(|| {
-            payload
-                .get("project")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .ok_or_else(|| "missing project in share payload".to_string())?;
-
-    let password = prompt_password("Master password: ")?;
-    let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
-    if !vault
-        .projects
-        .iter()
-        .any(|entry| entry.name == project_name)
-    {
-        add_project(&mut vault, &project_name).map_err(|e| e.to_string())?;
-    }
-
-    let secrets = payload
-        .get("secrets")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "missing secrets in share payload".to_string())?;
-    let mut imported = 0usize;
-    for secret in secrets {
-        let key = secret
-            .get("key")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing key in share payload".to_string())?;
-        let value = secret
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing value in share payload".to_string())?;
-        if add_secret(&mut vault, &project_name, key, value).is_ok() {
-            imported += 1;
-        }
-    }
-
-    crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("✓ Imported {imported} secrets into {project_name}"))
+        .unwrap_or_else(|| bundle_project.clone());
+    let import_result = if is_daemon_running() {
+        import_bundle_into_daemon(&project_name, &payload.secrets)?
+    } else {
+        let password = prompt_password("Master password: ")?;
+        import_bundle_offline(&password, &project_name, &payload.secrets)?
+    };
+    let manifest_result =
+        apply_bundle_manifest(payload.manifest.as_ref(), &bundle_project, &project_name)?;
+    log_share_bundle_event(&project_name, SHARE_BUNDLE_CLAIMED_METHOD)?;
+    Ok(format!(
+        "✓ Imported {} secrets into {project_name} (updated {})\n{}",
+        import_result.added,
+        import_result.updated,
+        manifest_result.message(),
+    ))
 }
 
 pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String> {
@@ -1159,8 +1220,24 @@ fn resolve_project(project: Option<&str>) -> Result<String, String> {
 }
 
 fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, String> {
+    get_project_secret_map_with_method(project, None)
+}
+
+fn get_project_secret_map_with_method(
+    project: &str,
+    method: Option<&str>,
+) -> Result<HashMap<String, String>, String> {
     if is_daemon_running() {
-        let response = send_ipc_request(json!({ "type": "get_all_secrets", "project": project }))?;
+        let mut request = json!({ "type": "get_all_secrets", "project": project });
+        if let Some(method) = method {
+            request["method"] = serde_json::Value::String(method.to_string());
+        }
+        let response = send_sensitive_ipc_request(
+            request,
+            ACTION_SCOPE_SECRET_EXPORT,
+            Some(project),
+            &format!("export secrets for {project}"),
+        )?;
         if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
             return Err(response_error(&response));
         }
@@ -1185,6 +1262,216 @@ fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, Stri
         .iter()
         .map(|secret| (secret.key.clone(), secret.value.to_string()))
         .collect())
+}
+
+fn import_bundle_into_daemon(
+    project: &str,
+    secrets: &[ShareBundleSecret],
+) -> Result<ClaimImportResult, String> {
+    let response = send_sensitive_ipc_request(
+        json!({
+            "type": "upsert_secrets_batch",
+            "project": project,
+            "secrets": secrets,
+        }),
+        ACTION_SCOPE_VAULT_MUTATE,
+        Some(project),
+        &format!("import shared secrets into {project}"),
+    )?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
+    }
+    Ok(ClaimImportResult {
+        added: response["added"].as_u64().unwrap_or(0) as usize,
+        updated: response["updated"].as_u64().unwrap_or(0) as usize,
+    })
+}
+
+fn import_bundle_offline(
+    password: &str,
+    project: &str,
+    secrets: &[ShareBundleSecret],
+) -> Result<ClaimImportResult, String> {
+    let mut vault = unlock_vault(password).map_err(|e| e.to_string())?;
+    if !vault.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut vault, project).map_err(|e| e.to_string())?;
+    }
+
+    let mut existing_keys = vault
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .map(|entry| {
+            entry
+                .secrets
+                .iter()
+                .map(|secret| secret.key.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut result = ClaimImportResult {
+        added: 0,
+        updated: 0,
+    };
+
+    for secret in secrets {
+        if existing_keys.contains(&secret.key) {
+            update_secret(&mut vault, project, &secret.key, &secret.value)
+                .map_err(|e| e.to_string())?;
+            result.updated += 1;
+        } else {
+            add_secret(&mut vault, project, &secret.key, &secret.value)
+                .map_err(|e| e.to_string())?;
+            existing_keys.insert(secret.key.clone());
+            result.added += 1;
+        }
+    }
+
+    crate::vault_file::write_vault(&vault, password)?;
+    Ok(result)
+}
+
+fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, String> {
+    let mut request = json!({
+        "type": "create_action_approval",
+        "scope": scope,
+    });
+    if let Some(project) = project {
+        request["project"] = serde_json::Value::String(project.to_string());
+    }
+    let response = send_ipc_request(request)?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
+    }
+    response["approval_id"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| "daemon response missing approval_id".to_string())
+}
+
+fn resolve_action_approval(approval_id: &str, approved: bool) -> Result<(), String> {
+    let response = send_ipc_request(json!({
+        "type": "approve_action_request",
+        "approval_id": approval_id,
+        "approved": approved,
+    }))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    Err(response_error(&response))
+}
+
+fn register_action_token(
+    scope: &str,
+    project: Option<&str>,
+    approval_id: &str,
+) -> Result<String, String> {
+    let mut request = json!({
+        "type": "register_action_token",
+        "scope": scope,
+        "approval_id": approval_id,
+    });
+    if let Some(project) = project {
+        request["project"] = serde_json::Value::String(project.to_string());
+    }
+    let response = send_ipc_request(request)?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
+    }
+    response["action_token"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| "daemon response missing action_token".to_string())
+}
+
+fn send_sensitive_ipc_request(
+    request: serde_json::Value,
+    scope: &str,
+    project: Option<&str>,
+    action_preview: &str,
+) -> Result<serde_json::Value, String> {
+    let approval_project = project.unwrap_or("lokalvault");
+    let approval_id = create_action_approval(scope, project)?;
+    let approved = crate::run_cmd::show_pin_dialog(approval_project, action_preview)?;
+    resolve_action_approval(&approval_id, approved)?;
+    if !approved {
+        return Err(format!("approval denied for {action_preview}"));
+    }
+    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_id)
+}
+
+fn send_sensitive_ipc_request_with_approval(
+    mut request: serde_json::Value,
+    scope: &str,
+    project: Option<&str>,
+    approval_id: &str,
+) -> Result<serde_json::Value, String> {
+    let action_token = register_action_token(scope, project, approval_id)?;
+    request["action_token"] = serde_json::Value::String(action_token);
+    send_ipc_request(request)
+}
+
+fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, String> {
+    let Some(config) = read_project_config()? else {
+        return Ok(None);
+    };
+    if config.project.name != project {
+        return Ok(None);
+    }
+    Ok(Some(ShareBundleManifest {
+        required: config.keys.required,
+        optional: config.keys.optional,
+    }))
+}
+
+fn apply_bundle_manifest(
+    manifest: Option<&ShareBundleManifest>,
+    bundle_project: &str,
+    project_name: &str,
+) -> Result<ClaimManifestResult, String> {
+    let Some(manifest) = manifest else {
+        return Ok(ClaimManifestResult::NoManifest);
+    };
+    if bundle_project != project_name {
+        return Ok(ClaimManifestResult::SkippedProjectOverride);
+    }
+
+    let existing = read_project_config()?;
+    match existing {
+        None => {
+            let config = merge_project_config_manifest(
+                None,
+                bundle_project,
+                &manifest.required,
+                &manifest.optional,
+            );
+            write_project_config(&config)?;
+            Ok(ClaimManifestResult::Wrote)
+        }
+        Some(existing) if existing.project.name == bundle_project => {
+            let config = merge_project_config_manifest(
+                Some(existing),
+                bundle_project,
+                &manifest.required,
+                &manifest.optional,
+            );
+            write_project_config(&config)?;
+            Ok(ClaimManifestResult::Merged)
+        }
+        Some(_) => Ok(ClaimManifestResult::SkippedConflict),
+    }
+}
+
+fn log_share_bundle_event(project: &str, method: &str) -> Result<(), String> {
+    log_access_event(AccessEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        process_name: current_process_name(),
+        exe_path: current_exe_path(),
+        project: project.to_string(),
+        key: SHARE_BUNDLE_SENTINEL_KEY.to_string(),
+        method: method.to_string(),
+        last_updated_at: None,
+    })
 }
 
 fn find_matching_secret_keys_in_project(
@@ -1289,6 +1576,9 @@ fn count_stale_secret_keys(
     let cutoff = chrono::Utc::now() - chrono::Duration::days(stale_days);
     let mut latest = BTreeMap::new();
     for event in events {
+        if is_share_bundle_event(&event.method) {
+            continue;
+        }
         let timestamp = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
             .map_err(|e| e.to_string())?
             .with_timezone(&chrono::Utc);
@@ -1305,6 +1595,44 @@ fn count_stale_secret_keys(
         .values()
         .filter(|timestamp| **timestamp < cutoff)
         .count())
+}
+
+fn is_share_bundle_event(method: &str) -> bool {
+    matches!(
+        method,
+        SHARE_BUNDLE_CREATED_METHOD | SHARE_BUNDLE_CLAIMED_METHOD | SHARE_BUNDLE_EXPORT_METHOD
+    )
+}
+
+fn take_test_password() -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Ok(None);
+    }
+
+    let raw = match env::var(TEST_PASSWORD_ENV) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(format!("{TEST_PASSWORD_ENV} contains invalid unicode"));
+        }
+    };
+
+    let mut passwords = raw
+        .split('\n')
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if passwords.is_empty() {
+        return Ok(None);
+    }
+
+    let password = passwords.remove(0);
+    if passwords.is_empty() {
+        unsafe { env::remove_var(TEST_PASSWORD_ENV) };
+    } else {
+        unsafe { env::set_var(TEST_PASSWORD_ENV, passwords.join("\n")) };
+    }
+    Ok(Some(password))
 }
 
 fn get_setting_value(settings: &Settings, key: &str) -> Result<String, String> {
@@ -1343,6 +1671,7 @@ fn parse_bool(value: &str, key: &str) -> Result<bool, String> {
 }
 
 fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String> {
+    cleanup_stale_socket();
     let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     command
         .arg("daemon")
@@ -1377,7 +1706,8 @@ fn spawn_detached_daemon(vault: &VaultData, password: &str) -> Result<(), String
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             return Err(format!("daemon exited during startup with status {status}"));
         }
-        if get_socket_path().exists() {
+        cleanup_stale_socket();
+        if is_daemon_running() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -1448,9 +1778,9 @@ fn ensure_ai_safe_gitignore() -> Result<(), String> {
 fn write_lve_file(path: &Path, password: &str, payload: &serde_json::Value) -> Result<(), String> {
     let salt = crate::crypto::generate_salt();
     let nonce = crate::crypto::generate_nonce();
-    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1)?;
     let plaintext = serde_json::to_vec(payload).map_err(|e| e.to_string())?;
-    let ciphertext = crate::crypto::encrypt(&plaintext, &key, &nonce);
+    let ciphertext = crate::crypto::encrypt(&plaintext, &key, &nonce)?;
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"LVSE");
@@ -1466,10 +1796,14 @@ fn read_lve_file(path: &Path, password: &str) -> Result<serde_json::Value, Strin
     if bytes.len() < 49 || &bytes[0..4] != b"LVSE" || bytes[4] != 0x01 {
         return Err("invalid .lve file".to_string());
     }
-    let salt: [u8; 32] = bytes[5..37].try_into().unwrap();
-    let nonce: [u8; 12] = bytes[37..49].try_into().unwrap();
+    let salt: [u8; 32] = bytes[5..37]
+        .try_into()
+        .map_err(|_| "invalid .lve file: corrupted salt".to_string())?;
+    let nonce: [u8; 12] = bytes[37..49]
+        .try_into()
+        .map_err(|_| "invalid .lve file: corrupted nonce".to_string())?;
     let ciphertext = &bytes[49..];
-    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1);
+    let key = crate::crypto::derive_key_with_params(password, &salt, 65_536, 3, 1)?;
     let plaintext = crate::crypto::decrypt(ciphertext, &key, &nonce)?;
     serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
 }
@@ -1520,9 +1854,34 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-pub fn push_test_passwords(passwords: &[&str]) {
-    let queue = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
-    queue.clear();
-    queue.extend(passwords.iter().map(|password| (*password).to_string()));
+mod tests {
+    use super::*;
+
+    fn sample_event(method: &str, key: &str, age_days: i64) -> AccessEvent {
+        AccessEvent {
+            timestamp: (chrono::Utc::now() - chrono::Duration::days(age_days)).to_rfc3339(),
+            process_name: "lokalvault".to_string(),
+            exe_path: "/usr/bin/lokalvault".to_string(),
+            project: "my-app".to_string(),
+            key: key.to_string(),
+            method: method.to_string(),
+            last_updated_at: None,
+        }
+    }
+
+    #[test]
+    fn test_count_stale_secret_keys_ignores_share_bundle_events() {
+        let stale = count_stale_secret_keys(
+            &[
+                sample_event("share_bundle_created", SHARE_BUNDLE_SENTINEL_KEY, 31),
+                sample_event("share_bundle_claimed", SHARE_BUNDLE_SENTINEL_KEY, 31),
+                sample_event("share_bundle_export", "OPENAI_KEY", 31),
+                sample_event("run_env", "OLD_SECRET", 31),
+            ],
+            30,
+        )
+        .unwrap();
+
+        assert_eq!(stale, 1);
+    }
 }

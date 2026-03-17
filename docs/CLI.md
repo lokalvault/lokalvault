@@ -87,8 +87,7 @@ lokalvault init --template stripe
 - `lokalvault get [project] KEY` — print a secret value
 - `lokalvault copy [project] KEY` — copy a secret to clipboard without printing it
 - `lokalvault import <path> --project <name>` — import dotenv-style secrets
-- `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format
-- `lokalvault export [project] --format dotenv|json|eval` — export a project; only `eval` is meant to be sourced into a shell
+- `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format; only `eval` is meant to be sourced into a shell
 - `lokalvault diff <path> [--project <name>]` — compare a dotenv file against the vault without printing values
 
 ### Run flows
@@ -110,8 +109,8 @@ lokalvault init --template stripe
 ### AI-safe and sharing workflows
 
 - `lokalvault ai-safe [--project <name>] [--generate-example]` — write `.lokalvault`, AI guidance, and gitignore protections
-- `lokalvault share <project> [--output file.lve]` — create an encrypted share bundle
-- `lokalvault claim <file.lve> [--project <name>]` — import a shared secret bundle
+- `lokalvault share <project> [--output file.lve]` — create an encrypted share bundle; includes `.lokalvault` key metadata when the current directory matches the shared project
+- `lokalvault claim <file.lve> [--project <name>]` — import a shared secret bundle; writes or merges `.lokalvault` only when the shared project matches the local target safely
 
 ### Repo protection
 
@@ -129,6 +128,8 @@ lokalvault init --template stripe
 - `lokalvault get` prints the secret value; prefer `lokalvault copy` when you only need to paste it elsewhere.
 - `lokalvault copy` never prints secret values.
 - `lokalvault diff .env` never prints secret values.
+- `lokalvault share` encrypts the bundle with a separate share password and may include project key metadata from `.lokalvault`.
+- `lokalvault claim` skips writing `.lokalvault` if the current directory already points at a different project or if `--project` overrides the shared project.
 - Clipboard clearing is best-effort.
 - Secret values are zeroized in daemon-owned memory where practical, but JSON IPC responses become plain strings at the daemon → CLI boundary.
 - `status` shows a session expiry estimate derived from daemon uptime and configured timeout.
@@ -139,6 +140,7 @@ lokalvault init --template stripe
 - The daemon is the only long-lived process that should hold the master password.
 - Unlock currently bootstraps the daemon by sending the password once over the daemon startup stdin pipe.
 - Runtime socket IPC requests do not carry the master password.
+- Sensitive daemon-backed CLI actions now use a daemon-tracked approval request plus a scoped single-use `action_token`.
 - Secret values become plain strings at unavoidable boundaries such as JSON IPC responses, child process environments, and the system clipboard.
 - `lokalvault push` may pass secret values through third-party CLI argument handling depending on the target platform CLI.
 - Daemon memory locking (`mlockall`) is best-effort; restricted environments may emit `Warning: memory locking unavailable ...` during daemon startup, but the daemon continues running.
@@ -172,6 +174,7 @@ stale secret count (audit history only — may be incomplete)
 - `run --watch` is a first-version recursive watcher on the current directory with no ignore rules or debounce yet.
 - Audit `process_name` and `exe_path` fields are informational only, not kernel-verified process identity.
 - macOS currently verifies peer UID but does not expose a reliable peer PID through the current socket credential path.
+- Sensitive IPC approval is stronger than raw same-UID trust, but it is not yet a daemon-owned human-verification boundary.
 - `push` depends on third-party CLIs and their current argument conventions.
 - `dev` is a best-effort detector for common local run commands, not a guaranteed project-aware launcher.
 

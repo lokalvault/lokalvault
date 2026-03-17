@@ -183,7 +183,7 @@ lokalvault run -- npm run dev
 ┌──────────────────────────────────────────────────────────────┐
 │  DAEMON (Rust, detached process, survives Tauri window close) │
 │  Holds: decrypted vault in RAM only                          │
-│  Socket: /tmp/lokalvault-{UID}.sock at 0600 permissions      │
+│  Socket: <os-temp-dir>/lokalvault-{UID}.sock at 0600 perms   │
 │  Verifies: every request via SO_PEERCRED (PID + UID)         │
 │  Manages: PID-scoped tokens with two-phase registration      │
 │  Logs: all key access events (names only, never values)      │
@@ -226,7 +226,7 @@ lokalvault run -- npm run dev
 ### Running an app (lokalvault run -- python app.py):
 ```
 7.  CLI reads .lokalvault in current dir → project = "my-saas-app"
-8.  CLI connects to /tmp/lokalvault-{UID}.sock
+8.  CLI connects to the per-user socket in the OS temp directory
 9.  CLI requests access for project "my-saas-app"
 10. Desktop app shows PIN dialog:
     ┌─────────────────────────────────────────┐
@@ -248,7 +248,7 @@ lokalvault run -- npm run dev
     - All project secrets as KEY=VALUE (Mode 1 default)
     - LV_RUN_TOKEN = token
     - LV_PROJECT = my-saas-app
-    - LV_SOCKET = /tmp/lokalvault-{UID}.sock
+    - LV_SOCKET = <os-temp-dir>/lokalvault-{UID}.sock
 16. OS returns child_pid = 12345
 17. CLI sends Phase 2 to daemon:
     { token, pid: 12345 }
@@ -528,7 +528,7 @@ On failure: log "Warning: memory locking unavailable (containers?)" — DO NOT c
 
 **create_socket() → Result<()>**
 Linux/macOS:
-  Unix domain socket at /tmp/lokalvault-{UID}.sock
+  Unix domain socket at std::env::temp_dir()/lokalvault-{UID}.sock
   chmod 0600 IMMEDIATELY after creation (before any listen call)
 Windows:
   Named Pipe: \\.\pipe\lokalvault-{username_hash}
@@ -653,7 +653,7 @@ Mode 2 (--sdk flag): only inject LV_RUN_TOKEN, LV_PROJECT, LV_SOCKET.
 Also always inject:
   LV_RUN_TOKEN = token (for optional SDK use)
   LV_PROJECT   = project name
-  LV_SOCKET    = /tmp/lokalvault-{UID}.sock
+  LV_SOCKET    = <os-temp-dir>/lokalvault-{UID}.sock
 
 **fetch_all_secrets(project: &str) → Result<HashMap<String, String>>**
 CLI-specific fetch (no token required — CLI was PIN-authenticated).
@@ -1348,7 +1348,7 @@ on the developer's machine and injected at runtime via `lokalvault run`.
 ## What You Must Not Do
 
 - Do not attempt to read vault files
-- Do not write code connecting to /tmp/lokalvault-*.sock
+- Do not write code connecting to the LokalVault runtime socket directly
 - Do not replace vault.get() calls with hardcoded values
 - Do not create .env files containing real secret values
 - Do not attempt to brute-force or decrypt vault files

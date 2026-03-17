@@ -77,6 +77,11 @@ impl Default for VaultData {
 // ── Vault path ──────────────────────────────────────────────────
 
 pub fn get_app_data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(override_dir) = crate::test_utils::get_test_data_dir() {
+        return override_dir;
+    }
+
     if let Ok(override_dir) = std::env::var("LOKALVAULT_DATA_DIR") {
         return PathBuf::from(override_dir);
     }
@@ -137,10 +142,10 @@ pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
         settings.argon2_memory_kb,
         settings.argon2_iterations,
         settings.argon2_parallelism,
-    );
+    )?;
 
     let json = serde_json::to_vec(vault).map_err(|e| e.to_string())?;
-    let ciphertext = encrypt(&json, &key, &nonce);
+    let ciphertext = encrypt(&json, &key, &nonce)?;
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(MAGIC);
@@ -186,8 +191,12 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
         return Err(format!("unsupported vault version: {}", bytes[4]));
     }
 
-    let salt: [u8; 32] = bytes[5..37].try_into().unwrap();
-    let nonce: [u8; 12] = bytes[37..49].try_into().unwrap();
+    let salt: [u8; 32] = bytes[5..37]
+        .try_into()
+        .map_err(|_| "vault file corrupted: invalid salt".to_string())?;
+    let nonce: [u8; 12] = bytes[37..49]
+        .try_into()
+        .map_err(|_| "vault file corrupted: invalid nonce".to_string())?;
     let ciphertext: &[u8] = &bytes[49..];
 
     let settings = read_settings();
@@ -197,7 +206,7 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
         settings.argon2_memory_kb,
         settings.argon2_iterations,
         settings.argon2_parallelism,
-    );
+    )?;
     let plaintext = decrypt(ciphertext, &key, &nonce)?;
 
     serde_json::from_slice(&plaintext).map_err(|e| e.to_string())

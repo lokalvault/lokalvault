@@ -36,12 +36,21 @@ pub fn get_settings_path() -> PathBuf {
 
 pub fn read_settings() -> Settings {
     let path = get_settings_path();
-    let contents = match fs::read_to_string(path) {
+    let contents = match fs::read_to_string(&path) {
         Ok(contents) => contents,
         Err(_) => return Settings::default(),
     };
 
-    serde_json::from_str(&contents).unwrap_or_default()
+    match serde_json::from_str(&contents) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!(
+                "Warning: settings file at {} contains invalid JSON ({e}), using defaults",
+                path.display()
+            );
+            Settings::default()
+        }
+    }
 }
 
 pub fn write_settings(settings: &Settings) -> Result<(), String> {

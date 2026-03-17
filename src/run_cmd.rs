@@ -1,6 +1,7 @@
 use crate::crypto::generate_token;
 use crate::daemon::{
-    DaemonState, POC_SOCKET_PATH, fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
+    DaemonState, fetch_all_secrets_for_boundary as fetch_all_secrets_from_state,
+    fetch_all_secrets_for_pending_boundary as fetch_all_secrets_pending, poc_socket_path,
     register_token_phase1, register_token_phase2,
 };
 use crate::ipc_client::send_ipc_request;
@@ -13,10 +14,16 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
+
+#[cfg(test)]
+static TEST_SHELL_PROGRAM: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+const TEST_PIN_APPROVAL_ENV: &str = "LOKALVAULT_TEST_PIN_APPROVAL";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectSection {
@@ -37,7 +44,9 @@ pub struct ProjectConfig {
 }
 
 pub async fn cmd_run_poc(command: Vec<String>) -> Result<std::process::ExitStatus, String> {
-    cmd_run_poc_with_socket(command, POC_SOCKET_PATH).await
+    let socket_path = poc_socket_path();
+    let socket_path = socket_path.to_string_lossy().to_string();
+    cmd_run_poc_with_socket(command, &socket_path).await
 }
 
 pub async fn cmd_run(
@@ -64,13 +73,20 @@ pub async fn cmd_run(
     let uid = unsafe { libc::geteuid() };
     register_token_phase1(state, &token, uid, &project_name)?;
 
-    let secrets = fetch_all_secrets(state, &token, 0, uid)?;
+    let secrets = fetch_all_secrets_pending_wrapper(state, &token, uid)?;
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
         cmd.args(&command[1..]);
     }
 
-    inject_secrets_into_env(&mut cmd, &secrets, &token, &project_name, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        &project_name,
+        &socket_path.display().to_string(),
+    );
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let child_pid = child.id();
 
@@ -97,9 +113,8 @@ pub async fn cmd_run_unified(
         return Err("vault is locked; run `lokalvault unlock` first".to_string());
     }
 
-    if let Some(project_name) = get_project_from_config()? {
-        let _ = project_name;
-        return cmd_run_poc(command).await;
+    if get_project_from_config()?.is_some() {
+        return Err("vault is locked; run `lokalvault unlock` first".to_string());
     }
 
     if get_vault_path().exists() {
@@ -152,7 +167,7 @@ pub async fn cmd_run_entry(
     }
 
     if resolved_project.is_some() {
-        return cmd_run_poc(command).await;
+        return Err("vault is locked - run lokalvault unlock first".to_string());
     }
 
     cmd_run_unified(None, resolved_project.as_deref(), command).await
@@ -195,6 +210,42 @@ pub fn read_project_config() -> Result<Option<ProjectConfig>, String> {
 pub fn write_project_config(config: &ProjectConfig) -> Result<(), String> {
     let contents = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
     fs::write(".lokalvault", contents).map_err(|e| e.to_string())
+}
+
+pub fn merge_project_config_manifest(
+    existing: Option<ProjectConfig>,
+    project: &str,
+    required: &[String],
+    optional: &[String],
+) -> ProjectConfig {
+    let mut config = existing.unwrap_or_default();
+    config.project.name = project.to_string();
+    config.keys.required = dedupe_in_order(
+        config
+            .keys
+            .required
+            .into_iter()
+            .chain(required.iter().cloned()),
+    );
+    config.keys.optional = dedupe_in_order(
+        config
+            .keys
+            .optional
+            .into_iter()
+            .chain(optional.iter().cloned()),
+    );
+    config
+}
+
+fn dedupe_in_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value);
+        }
+    }
+    deduped
 }
 
 async fn run_with_real_daemon(
@@ -251,12 +302,20 @@ async fn run_with_real_daemon(
     if command.len() > 1 {
         cmd.args(&command[1..]);
     }
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        project,
+        &socket_path.display().to_string(),
+    );
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
         "token": token,
+        "pid": child.id(),
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(phase2["error"]
@@ -269,6 +328,17 @@ async fn run_with_real_daemon(
 }
 
 pub fn show_pin_dialog(project: &str, _command_preview: &str) -> Result<bool, String> {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var(TEST_PIN_APPROVAL_ENV) {
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "1" | "true" | "yes" | "allow") {
+            return Ok(true);
+        }
+        if matches!(normalized.as_str(), "0" | "false" | "no" | "deny") {
+            return Ok(false);
+        }
+    }
+
     use rand::Rng;
     let code = format!("{:02}", rand::thread_rng().gen_range(0u8..=99));
     print!("Type [{code}] to allow access to '{project}': ");
@@ -307,6 +377,16 @@ pub fn inject_secrets_into_env(
 }
 
 pub fn shell_program() -> String {
+    #[cfg(test)]
+    if let Some(shell) = TEST_SHELL_PROGRAM
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return shell;
+    }
+
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
@@ -322,6 +402,14 @@ pub fn fetch_all_secrets(
     uid: u32,
 ) -> Result<HashMap<String, String>, String> {
     fetch_all_secrets_from_state(state, token, pid, uid).map_err(|e| e.message())
+}
+
+pub fn fetch_all_secrets_pending_wrapper(
+    state: &DaemonState,
+    token: &str,
+    uid: u32,
+) -> Result<HashMap<String, String>, String> {
+    fetch_all_secrets_pending(state, token, uid).map_err(|e| e.message())
 }
 
 async fn cmd_run_poc_with_socket(
@@ -387,12 +475,20 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
     if command.len() > 1 {
         cmd.args(&command[1..]);
     }
-    inject_secrets_into_env(&mut cmd, &secrets, &token, project, POC_SOCKET_PATH);
+    let socket_path = crate::ipc_client::get_socket_path();
+    inject_secrets_into_env(
+        &mut cmd,
+        &secrets,
+        &token,
+        project,
+        &socket_path.display().to_string(),
+    );
     let child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let phase2 = send_ipc_request(serde_json::json!({
         "type": "register_token_phase2",
         "token": token,
+        "pid": child.id(),
     }))?;
     if phase2.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Err(phase2["error"]
@@ -405,7 +501,9 @@ async fn spawn_with_real_daemon(project: &str, command: Vec<String>) -> Result<C
 }
 
 async fn spawn_poc_child(command: Vec<String>) -> Result<Child, String> {
-    let secret_value = fetch_poc_secret(POC_SOCKET_PATH).await?;
+    let socket_path = poc_socket_path();
+    let socket_path = socket_path.to_string_lossy().to_string();
+    let secret_value = fetch_poc_secret(&socket_path).await?;
     let mut cmd = Command::new(&command[0]);
     if command.len() > 1 {
         cmd.args(&command[1..]);
@@ -550,19 +648,50 @@ mod tests {
     use crate::daemon::{run_daemon_poc_at_path, start_daemon, unique_poc_socket_path};
     use crate::vault_file::{Project, Secret, VaultData};
     use std::path::Path;
+    use tokio::task::JoinHandle;
+    use tokio::time::timeout;
+
+    fn unix_sockets_available() -> bool {
+        let socket_path = unique_poc_socket_path("run-cmd-probe");
+        let _ = std::fs::remove_file(&socket_path);
+        let result = std::os::unix::net::UnixListener::bind(&socket_path);
+        match result {
+            Ok(listener) => {
+                drop(listener);
+                let _ = std::fs::remove_file(&socket_path);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+            Err(error) => panic!("failed to probe unix socket support: {error}"),
+        }
+    }
+
+    async fn wait_for_poc_socket(socket_path: &Path, daemon: &JoinHandle<Result<(), String>>) {
+        for _ in 0..100 {
+            if socket_path.exists() {
+                return;
+            }
+            if daemon.is_finished() {
+                panic!(
+                    "daemon task exited before socket became ready: {}",
+                    socket_path.display()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("daemon socket did not appear: {}", socket_path.display());
+    }
 
     #[tokio::test]
     async fn test_cmd_run_poc_injects_openai_key_into_child() {
+        if !unix_sockets_available() {
+            return;
+        }
         let socket_path = unique_poc_socket_path("run-cmd");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         let daemon = tokio::spawn(async { run_daemon_poc_at_path(socket_path).await });
 
-        for _ in 0..50 {
-            if Path::new(&socket_path_string).exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_for_poc_socket(Path::new(&socket_path_string), &daemon).await;
 
         let status = cmd_run_poc_with_socket(
             vec![
@@ -577,7 +706,13 @@ mod tests {
         .unwrap();
 
         assert!(status.success());
-        assert!(daemon.await.unwrap().is_ok());
+        assert!(
+            timeout(Duration::from_secs(3), daemon)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -608,8 +743,15 @@ mod tests {
 
     #[test]
     fn test_shell_program_prefers_env_shell() {
-        unsafe { std::env::set_var("SHELL", "/bin/zsh") };
+        *TEST_SHELL_PROGRAM
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some("/bin/zsh".to_string());
         assert_eq!(shell_program(), "/bin/zsh");
+        *TEST_SHELL_PROGRAM
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]
@@ -640,9 +782,9 @@ mod tests {
         });
 
         register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
-        register_token_phase2(&state, "token-1", 0, Duration::from_secs(60)).unwrap();
+        register_token_phase2(&state, "token-1", 777, Duration::from_secs(60)).unwrap();
 
-        let secrets = fetch_all_secrets(&state, "token-1", 0, 501).unwrap();
+        let secrets = fetch_all_secrets(&state, "token-1", 777, 501).unwrap();
         assert_eq!(
             secrets.get("OPENAI_KEY"),
             Some(&"test-value-123".to_string())
@@ -655,5 +797,76 @@ mod tests {
         let error = fetch_all_secrets(&state, "missing-token", 0, 501).unwrap_err();
 
         assert_eq!(error, "token invalid");
+    }
+
+    #[test]
+    fn test_fetch_all_secrets_pending_wrapper_works_before_phase2() {
+        let state = start_daemon(VaultData {
+            version: 1,
+            projects: vec![Project {
+                name: "my-app".to_string(),
+                secrets: vec![Secret {
+                    key: "OPENAI_KEY".to_string(),
+                    value: zeroize::Zeroizing::new("test-value-123".to_string()),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                }],
+            }],
+        });
+
+        register_token_phase1(&state, "token-1", 501, "my-app").unwrap();
+
+        let secrets = fetch_all_secrets_pending_wrapper(&state, "token-1", 501).unwrap();
+        assert_eq!(
+            secrets.get("OPENAI_KEY"),
+            Some(&"test-value-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_project_config_manifest_writes_new_config() {
+        let config = merge_project_config_manifest(
+            None,
+            "my-app",
+            &["OPENAI_KEY".to_string(), "DATABASE_URL".to_string()],
+            &["STRIPE_KEY".to_string()],
+        );
+
+        assert_eq!(config.project.name, "my-app");
+        assert_eq!(config.keys.required, vec!["OPENAI_KEY", "DATABASE_URL"]);
+        assert_eq!(config.keys.optional, vec!["STRIPE_KEY"]);
+    }
+
+    #[test]
+    fn test_merge_project_config_manifest_preserves_order_and_dedupes() {
+        let config = merge_project_config_manifest(
+            Some(ProjectConfig {
+                project: ProjectSection {
+                    name: "old-project".to_string(),
+                },
+                keys: KeysSection {
+                    required: vec!["OPENAI_KEY".to_string(), "DATABASE_URL".to_string()],
+                    optional: vec!["OPTIONAL_ONE".to_string()],
+                },
+            }),
+            "my-app",
+            &[
+                "DATABASE_URL".to_string(),
+                "NEW_REQUIRED".to_string(),
+                "OPENAI_KEY".to_string(),
+            ],
+            &[
+                "OPTIONAL_ONE".to_string(),
+                "OPTIONAL_TWO".to_string(),
+                "OPTIONAL_TWO".to_string(),
+            ],
+        );
+
+        assert_eq!(config.project.name, "my-app");
+        assert_eq!(
+            config.keys.required,
+            vec!["OPENAI_KEY", "DATABASE_URL", "NEW_REQUIRED"]
+        );
+        assert_eq!(config.keys.optional, vec!["OPTIONAL_ONE", "OPTIONAL_TWO"]);
     }
 }
