@@ -140,7 +140,7 @@ lokalvault init --template stripe
 - The daemon is the only long-lived process that should hold the master password.
 - Unlock currently bootstraps the daemon by sending the password once over the daemon startup stdin pipe.
 - Runtime socket IPC requests do not carry the master password.
-- Sensitive daemon-backed CLI actions now use a daemon-tracked approval request plus a scoped single-use `action_token`.
+- Sensitive daemon-backed CLI actions now use a daemon-tracked approval session, a single-use approval proof, and a scoped single-use `action_token`.
 - Secret values become plain strings at unavoidable boundaries such as JSON IPC responses, child process environments, and the system clipboard.
 - `lokalvault push` may pass secret values through third-party CLI argument handling depending on the target platform CLI.
 - Daemon memory locking (`mlockall`) is best-effort; restricted environments may emit `Warning: memory locking unavailable ...` during daemon startup, but the daemon continues running.
@@ -174,7 +174,7 @@ stale secret count (audit history only — may be incomplete)
 - `run --watch` is a first-version recursive watcher on the current directory with no ignore rules or debounce yet.
 - Audit `process_name` and `exe_path` fields are informational only, not kernel-verified process identity.
 - macOS currently verifies peer UID but does not expose a reliable peer PID through the current socket credential path.
-- Sensitive IPC approval is stronger than raw same-UID trust, but it is not yet a daemon-owned human-verification boundary.
+- Sensitive IPC approval now mints tokens from daemon-validated approval proofs, but the terminal approval fallback is still not a daemon-owned human-verification boundary.
 - `push` depends on third-party CLIs and their current argument conventions.
 - `dev` is a best-effort detector for common local run commands, not a guaranteed project-aware launcher.
 

@@ -3,6 +3,7 @@ use clap_complete::{
     generate,
     shells::{Bash, Fish, Zsh},
 };
+use lokalvault::errors::AppError;
 use lokalvault::{cli, daemon, run_cmd};
 use std::io::Read;
 use zeroize::Zeroize;
@@ -193,8 +194,11 @@ enum ConfigCommands {
 async fn main() {
     let cli = Cli::parse();
 
-    let result = match cli.command {
-        Commands::DaemonPoc => daemon::run_daemon_poc().await.map(|_| ()),
+    let result: Result<(), AppError> = match cli.command {
+        Commands::DaemonPoc => daemon::run_daemon_poc()
+            .await
+            .map(|_| ())
+            .map_err(AppError::from),
         Commands::Daemon => {
             let mut input = Vec::new();
             if let Err(e) = std::io::stdin().read_to_end(&mut input) {
@@ -211,7 +215,10 @@ async fn main() {
                     }
                 };
             input.zeroize();
-            daemon::run_daemon_server(vault, password).await.map(|_| ())
+            daemon::run_daemon_server(vault, password)
+                .await
+                .map(|_| ())
+                .map_err(AppError::from)
         }
         Commands::Create => cli::cmd_create().map(|message| {
             eprintln!("{message}");
@@ -447,20 +454,24 @@ async fn main() {
     }
 }
 
-fn parse_since_flag(input: &str) -> Result<std::time::SystemTime, String> {
+fn parse_since_flag(input: &str) -> Result<std::time::SystemTime, AppError> {
     let value = input.trim();
     if value.is_empty() {
-        return Err("since cannot be empty".to_string());
+        return Err(AppError::ValidationError(
+            "since cannot be empty".to_string(),
+        ));
     }
     let Some(days) = value.strip_suffix('d') else {
-        return Err("since must use day suffix like 7d".to_string());
+        return Err(AppError::ValidationError(
+            "since must use day suffix like 7d".to_string(),
+        ));
     };
     let days: u64 = days
         .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+        .map_err(|e: std::num::ParseIntError| AppError::ValidationError(e.to_string()))?;
     std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(days * 24 * 60 * 60))
-        .ok_or_else(|| "invalid since range".to_string())
+        .ok_or_else(|| AppError::ValidationError("invalid since range".to_string()))
 }
 
 #[cfg(test)]

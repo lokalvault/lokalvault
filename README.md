@@ -145,8 +145,8 @@ LokalVault is designed specifically against the AI agent threat:
 - Vault file encrypted with AES-256-GCM (Argon2id key derivation)
 - Secrets held in daemon RAM only — never written to disk
 - Sensitive daemon-backed requests require a scoped single-use token
-- Token minting currently depends on a daemon-tracked approval flow; full daemon-owned human verification is still in progress
-- AI agents have no token → daemon rejects all their requests
+- Token minting now depends on a daemon-tracked approval session plus daemon-validated approval proof; full daemon-owned human verification is still in progress
+- Unapproved requests are rejected, but the terminal approval fallback remains transitional until the daemon-owned UI approval path exists
 
 Current security rules: `docs/SECURITY_RULES.md`
 

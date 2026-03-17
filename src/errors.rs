@@ -4,7 +4,8 @@ use std::fmt;
 pub enum AppError {
     WrongPassword,
     VaultNotFound,
-    VaultCorrupted,
+    VaultCorrupted(String),
+    UnsupportedVaultVersion(u8),
     ProjectNotFound(String),
     SecretNotFound(String),
     ProjectAlreadyExists(String),
@@ -17,7 +18,12 @@ pub enum AppError {
     TokenExpired,
     PidMismatch,
     UidMismatch,
-    RateLimited,
+    ApprovalDenied(String),
+    RateLimited(Option<u64>),
+    InvalidResponse(String),
+    ClipboardError(String),
+    ProcessError(String),
+    ConfigError(String),
     CryptoError(String),
     IoError(String),
     SerdeError(String),
@@ -29,7 +35,10 @@ impl AppError {
         match self {
             Self::WrongPassword => "wrong password".to_string(),
             Self::VaultNotFound => "vault not found".to_string(),
-            Self::VaultCorrupted => "vault corrupted".to_string(),
+            Self::VaultCorrupted(message) => message.clone(),
+            Self::UnsupportedVaultVersion(version) => {
+                format!("unsupported vault version: {version}")
+            }
             Self::ProjectNotFound(name) => format!("project not found: {name}"),
             Self::SecretNotFound(name) => format!("secret not found: {name}"),
             Self::ProjectAlreadyExists(name) => format!("project already exists: {name}"),
@@ -42,12 +51,51 @@ impl AppError {
             Self::TokenExpired => "token expired".to_string(),
             Self::PidMismatch => "client-reported pid mismatch".to_string(),
             Self::UidMismatch => "client-reported uid mismatch".to_string(),
-            Self::RateLimited => "rate limited".to_string(),
+            Self::ApprovalDenied(message) => message.clone(),
+            Self::RateLimited(Some(retry_after_ms)) => {
+                format!("rate limit exceeded — retry after {retry_after_ms}ms")
+            }
+            Self::RateLimited(None) => "rate limit exceeded".to_string(),
+            Self::InvalidResponse(message) => message.clone(),
+            Self::ClipboardError(message) => message.clone(),
+            Self::ProcessError(message) => message.clone(),
+            Self::ConfigError(message) => message.clone(),
             Self::CryptoError(message) => message.clone(),
             Self::IoError(message) => message.clone(),
             Self::SerdeError(message) => message.clone(),
             Self::IpcError(message) => message.clone(),
         }
+    }
+
+    pub fn from_daemon_message(message: &str) -> Self {
+        match message {
+            "daemon not running" => Self::DaemonNotRunning,
+            "token invalid" | "action token invalid" => Self::TokenInvalid,
+            "token expired" | "action token expired" => Self::TokenExpired,
+            "client-reported pid mismatch" | "action token pid mismatch" => Self::PidMismatch,
+            "client-reported uid mismatch" | "action token uid mismatch" => Self::UidMismatch,
+            "approval denied" => Self::ApprovalDenied("approval denied".to_string()),
+            "daemon returned empty response" => {
+                Self::InvalidResponse("daemon returned empty response".to_string())
+            }
+            _ if message.starts_with("rate limit exceeded") => {
+                let retry_after_ms = message
+                    .split("retry after ")
+                    .nth(1)
+                    .and_then(|value| value.strip_suffix("ms"))
+                    .and_then(|value| value.parse::<u64>().ok());
+                Self::RateLimited(retry_after_ms)
+            }
+            _ => Self::IpcError(message.to_string()),
+        }
+    }
+
+    pub fn from_daemon_response(response: &serde_json::Value) -> Self {
+        response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(Self::from_daemon_message)
+            .unwrap_or_else(|| Self::InvalidResponse("unknown daemon error".to_string()))
     }
 }
 
@@ -56,6 +104,8 @@ impl fmt::Display for AppError {
         write!(f, "{}", self.message())
     }
 }
+
+impl std::error::Error for AppError {}
 
 impl From<std::io::Error> for AppError {
     fn from(error: std::io::Error) -> Self {
@@ -72,6 +122,18 @@ impl From<serde_json::Error> for AppError {
 impl From<String> for AppError {
     fn from(error: String) -> Self {
         Self::IoError(error)
+    }
+}
+
+impl From<toml::de::Error> for AppError {
+    fn from(error: toml::de::Error) -> Self {
+        Self::ConfigError(error.to_string())
+    }
+}
+
+impl From<toml::ser::Error> for AppError {
+    fn from(error: toml::ser::Error) -> Self {
+        Self::ConfigError(error.to_string())
     }
 }
 
@@ -112,5 +174,31 @@ mod tests {
 
         assert_eq!(io_error.to_string(), "disk full");
         assert!(serde_error.to_string().contains("EOF while parsing"));
+    }
+
+    #[test]
+    fn test_from_daemon_message_parses_rate_limit_retry_after() {
+        assert_eq!(
+            AppError::from_daemon_message("rate limit exceeded — retry after 250ms"),
+            AppError::RateLimited(Some(250))
+        );
+    }
+
+    #[test]
+    fn test_from_daemon_response_maps_known_error() {
+        let response = serde_json::json!({ "ok": false, "error": "token invalid" });
+        assert_eq!(
+            AppError::from_daemon_response(&response),
+            AppError::TokenInvalid
+        );
+    }
+
+    #[test]
+    fn test_from_daemon_response_maps_unknown_error_to_ipc_error() {
+        let response = serde_json::json!({ "ok": false, "error": "unexpected boom" });
+        assert_eq!(
+            AppError::from_daemon_response(&response),
+            AppError::IpcError("unexpected boom".to_string())
+        );
     }
 }

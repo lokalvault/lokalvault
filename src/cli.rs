@@ -1,6 +1,7 @@
 use crate::audit_log::{
     AccessEvent, AuditFilter, clear_audit_log, log_access_event, read_audit_log,
 };
+use crate::errors::AppError;
 use crate::ipc_client::{
     cleanup_stale_socket, get_socket_path, is_daemon_running, send_ipc_request,
 };
@@ -95,12 +96,14 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    pub fn parse(input: &str) -> Result<Self, String> {
+    pub fn parse(input: &str) -> Result<Self, AppError> {
         match input {
             "dotenv" => Ok(Self::Dotenv),
             "json" => Ok(Self::Json),
             "eval" => Ok(Self::Eval),
-            _ => Err(format!("unsupported export format: {input}")),
+            _ => Err(AppError::ValidationError(format!(
+                "unsupported export format: {input}"
+            ))),
         }
     }
 }
@@ -130,18 +133,18 @@ fn current_exe_path() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-pub fn prompt_password(prompt: &str) -> Result<String, String> {
+pub fn prompt_password(prompt: &str) -> Result<String, AppError> {
     eprint!("{prompt}");
-    io::stderr().flush().map_err(|e| e.to_string())?;
+    io::stderr().flush()?;
 
     if let Some(password) = take_test_password()? {
         return Ok(password);
     }
 
-    read_password().map_err(|e| e.to_string())
+    read_password().map_err(AppError::from)
 }
 
-pub fn cmd_create() -> Result<String, String> {
+pub fn cmd_create() -> Result<String, AppError> {
     let password = prompt_password("Master password: ")?;
     let (strength, feedback) = crate::crypto::validate_password_strength(&password);
     if matches!(
@@ -150,13 +153,13 @@ pub fn cmd_create() -> Result<String, String> {
             | crate::crypto::PasswordStrength::Weak
             | crate::crypto::PasswordStrength::Fair
     ) {
-        return Err(format!("password rejected: {feedback}"));
+        return Err(format!("password rejected: {feedback}").into());
     }
     create_vault(&password).map_err(|e| e.to_string())?;
     Ok(format!("Vault created at {}", get_vault_path().display()))
 }
 
-pub fn cmd_unlock() -> Result<String, String> {
+pub fn cmd_unlock() -> Result<String, AppError> {
     let _ = check_for_dotenv_in_cwd("lokalvault-project");
     let password = prompt_password("Master password: ")?;
     let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
@@ -172,12 +175,14 @@ pub enum ProjectTemplate {
 }
 
 impl ProjectTemplate {
-    pub fn parse(input: &str) -> Result<Self, String> {
+    pub fn parse(input: &str) -> Result<Self, AppError> {
         match input {
             "openai" => Ok(Self::OpenAi),
             "supabase" => Ok(Self::Supabase),
             "stripe" => Ok(Self::Stripe),
-            _ => Err(format!("unsupported template: {input}")),
+            _ => Err(AppError::ValidationError(format!(
+                "unsupported template: {input}"
+            ))),
         }
     }
 
@@ -201,7 +206,7 @@ impl ProjectTemplate {
     }
 }
 
-pub fn cmd_lock() -> Result<String, String> {
+pub fn cmd_lock() -> Result<String, AppError> {
     cleanup_stale_socket();
     if !is_daemon_running() {
         return Ok("Vault already locked.".to_string());
@@ -216,7 +221,7 @@ pub fn cmd_lock() -> Result<String, String> {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        return Err("daemon failed to stop within 3s".to_string());
+        return Err("daemon failed to stop within 3s".to_string().into());
     }
 
     Err(response_error(&response))
@@ -225,7 +230,7 @@ pub fn cmd_lock() -> Result<String, String> {
 pub fn cmd_init(
     project_name: Option<&str>,
     template: Option<ProjectTemplate>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let name = match project_name {
         Some(name) => name.to_string(),
         None => env::current_dir()
@@ -253,10 +258,12 @@ pub fn cmd_add(
     key: &str,
     value: Option<&str>,
     from_clipboard: bool,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     if from_clipboard && value.is_some() {
-        return Err("cannot use a literal value and --clipboard together".to_string());
+        return Err("cannot use a literal value and --clipboard together"
+            .to_string()
+            .into());
     }
     let secret_value = match (value, from_clipboard) {
         (Some(value), false) => {
@@ -301,14 +308,18 @@ pub fn cmd_add(
     Ok(format!("✓ Added {key} to {project}"))
 }
 
-pub fn cmd_copy(project: Option<&str>, key: &str) -> Result<String, String> {
+pub fn cmd_copy(project: Option<&str>, key: &str) -> Result<String, AppError> {
     let value = cmd_get(project, key)?;
     write_to_clipboard(&value)?;
     schedule_clipboard_clear(value)?;
     Ok(format!("✓ {key} copied to clipboard"))
 }
 
-pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Result<String, String> {
+pub fn cmd_update(
+    project: Option<&str>,
+    key: &str,
+    value: Option<&str>,
+) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     let secret_value = match value {
         Some(value) => value.to_string(),
@@ -340,7 +351,7 @@ pub fn cmd_update(project: Option<&str>, key: &str, value: Option<&str>) -> Resu
     Ok(format!("✓ Updated {key} in {project}"))
 }
 
-pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
+pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, AppError> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
@@ -367,7 +378,7 @@ pub fn cmd_delete(project: Option<&str>, key: &str) -> Result<String, String> {
     Ok(format!("✓ Deleted {key} from {project}"))
 }
 
-pub fn cmd_delete_project(project: &str) -> Result<String, String> {
+pub fn cmd_delete_project(project: &str) -> Result<String, AppError> {
     if is_daemon_running() {
         let response = send_sensitive_ipc_request(
             json!({
@@ -391,7 +402,7 @@ pub fn cmd_delete_project(project: &str) -> Result<String, String> {
     Ok(format!("✓ Deleted project {project}"))
 }
 
-pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
+pub fn cmd_list(project: Option<&str>) -> Result<String, AppError> {
     let project = project
         .map(|name| resolve_project(Some(name)))
         .transpose()?;
@@ -442,7 +453,7 @@ pub fn cmd_list(project: Option<&str>) -> Result<String, String> {
     }
 }
 
-pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
+pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, AppError> {
     let project = resolve_project(project)?;
 
     if is_daemon_running() {
@@ -480,7 +491,7 @@ pub fn cmd_get(project: Option<&str>, key: &str) -> Result<String, String> {
     Ok(secret.value.to_string())
 }
 
-pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
+pub fn cmd_import(path: &Path, project: &str) -> Result<String, AppError> {
     let preview = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let keys = preview
         .lines()
@@ -495,7 +506,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
         .read_line(&mut input)
         .map_err(|e| e.to_string())?;
     if input.trim().to_lowercase() != "y" {
-        return Err("import cancelled".to_string());
+        return Err("import cancelled".to_string().into());
     }
 
     if is_daemon_running() {
@@ -545,7 +556,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     ))
 }
 
-pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String, String> {
+pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     if matches!(format, ExportFormat::Eval) {
         eprintln!("Eval output can be sourced into your shell. Clear with: unset KEY");
@@ -582,7 +593,7 @@ pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String,
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
                 .collect();
-            serde_json::to_string(&json_map).map_err(|e| e.to_string())
+            Ok(serde_json::to_string(&json_map).map_err(|e| e.to_string())?)
         }
         ExportFormat::Eval => Ok(secrets
             .iter()
@@ -592,7 +603,7 @@ pub fn cmd_export(project: Option<&str>, format: ExportFormat) -> Result<String,
     }
 }
 
-pub fn cmd_diff(path: &Path, project: Option<&str>) -> Result<String, String> {
+pub fn cmd_diff(path: &Path, project: Option<&str>) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     let dotenv = parse_dotenv_file(path)?;
     let vault = get_project_secret_map(&project)?;
@@ -615,7 +626,7 @@ pub fn cmd_diff(path: &Path, project: Option<&str>) -> Result<String, String> {
         .join("\n"))
 }
 
-pub fn cmd_status() -> Result<String, String> {
+pub fn cmd_status() -> Result<String, AppError> {
     let mut lines = vec![
         "LokalVault Status".to_string(),
         "------------------------------".to_string(),
@@ -684,7 +695,7 @@ pub fn cmd_status() -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
-pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
+pub fn cmd_shell(project: Option<&str>) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     let secrets = get_project_secret_map(&project)?;
     let shell = shell_program();
@@ -704,7 +715,7 @@ pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
     #[cfg(unix)]
     {
         let err = cmd.exec();
-        Err(format!("failed to launch shell: {err}"))
+        Err(format!("failed to launch shell: {err}").into())
     }
 
     #[cfg(not(unix))]
@@ -717,7 +728,7 @@ pub fn cmd_shell(project: Option<&str>) -> Result<String, String> {
     }
 }
 
-pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, String> {
+pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, AppError> {
     let events = read_audit_log(filter)?;
     Ok(events
         .into_iter()
@@ -734,7 +745,7 @@ pub fn cmd_audit(filter: Option<AuditFilter>) -> Result<String, String> {
         .join("\n"))
 }
 
-pub fn cmd_audit_clear() -> Result<String, String> {
+pub fn cmd_audit_clear() -> Result<String, AppError> {
     eprint!("Clear all audit logs? [y/N]: ");
     io::stderr().flush().map_err(|e| e.to_string())?;
     let mut input = String::new();
@@ -742,19 +753,19 @@ pub fn cmd_audit_clear() -> Result<String, String> {
         .read_line(&mut input)
         .map_err(|e| e.to_string())?;
     if input.trim().to_lowercase() != "y" {
-        return Err("audit clear cancelled".to_string());
+        return Err("audit clear cancelled".to_string().into());
     }
 
     clear_audit_log()?;
     Ok("✓ Cleared audit log.".to_string())
 }
 
-pub fn cmd_config_get(key: &str) -> Result<String, String> {
+pub fn cmd_config_get(key: &str) -> Result<String, AppError> {
     let settings = read_settings();
-    get_setting_value(&settings, key)
+    Ok(get_setting_value(&settings, key)?)
 }
 
-pub fn cmd_config_set(key: &str, value: &str) -> Result<String, String> {
+pub fn cmd_config_set(key: &str, value: &str) -> Result<String, AppError> {
     let mut settings = read_settings();
     match key {
         "session-timeout-minutes" => {
@@ -778,13 +789,13 @@ pub fn cmd_config_set(key: &str, value: &str) -> Result<String, String> {
                 Some(value.to_string())
             };
         }
-        _ => return Err(format!("unsupported config key: {key}")),
+        _ => return Err(format!("unsupported config key: {key}").into()),
     }
     write_settings(&settings)?;
     Ok(format!("Set {key}={}", get_setting_value(&settings, key)?))
 }
 
-pub fn cmd_config_list() -> Result<String, String> {
+pub fn cmd_config_list() -> Result<String, AppError> {
     let settings = read_settings();
     Ok([
         format!(
@@ -814,7 +825,7 @@ pub fn cmd_push(
     project: &str,
     target: PushTarget,
     environment: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let environment = environment.unwrap_or("production");
     let secrets = get_project_secret_map(project)?;
     eprintln!(
@@ -855,7 +866,8 @@ pub fn cmd_push(
             "push failed for {}: {}",
             push_target_name(target),
             failures.join(", ")
-        ));
+        )
+        .into());
     }
 
     Ok(format!(
@@ -865,7 +877,7 @@ pub fn cmd_push(
     ))
 }
 
-fn check_for_dotenv_in_cwd(project_name: &str) -> Result<(), String> {
+fn check_for_dotenv_in_cwd(project_name: &str) -> Result<(), AppError> {
     let dotenv_path = Path::new(".env");
     if !dotenv_path.exists() {
         return Ok(());
@@ -885,7 +897,7 @@ fn check_for_dotenv_in_cwd(project_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn cmd_doctor() -> Result<(String, bool), String> {
+pub fn cmd_doctor() -> Result<(String, bool), AppError> {
     let mut lines = Vec::new();
     let mut failed = false;
 
@@ -936,7 +948,7 @@ pub fn cmd_doctor() -> Result<(String, bool), String> {
     Ok((lines.join("\n"), failed))
 }
 
-pub fn cmd_dev() -> Result<String, String> {
+pub fn cmd_dev() -> Result<String, AppError> {
     let detected = if Path::new("package.json").exists() {
         let package = fs::read_to_string("package.json").map_err(|e| e.to_string())?;
         if package.contains("\"dev\"") {
@@ -966,7 +978,9 @@ pub fn cmd_dev() -> Result<String, String> {
 
     if detected.is_empty() {
         return Err(
-            "Could not detect run command. Use: lokalvault run -- <your command>".to_string(),
+            "Could not detect run command. Use: lokalvault run -- <your command>"
+                .to_string()
+                .into(),
         );
     }
 
@@ -974,7 +988,7 @@ pub fn cmd_dev() -> Result<String, String> {
     Ok(detected.join(" "))
 }
 
-pub fn cmd_audit_stale(days: u64, never_accessed: bool) -> Result<String, String> {
+pub fn cmd_audit_stale(days: u64, never_accessed: bool) -> Result<String, AppError> {
     let events = read_audit_log(None)?;
     let since = chrono::Utc::now() - chrono::Duration::days(days as i64);
     let mut lines = Vec::new();
@@ -994,7 +1008,7 @@ pub fn cmd_audit_stale(days: u64, never_accessed: bool) -> Result<String, String
     Ok(lines.join("\n"))
 }
 
-pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<String, String> {
+pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     let keys = if is_daemon_running() {
         let response = send_ipc_request(json!({ "type": "list_keys", "project": project }))?;
@@ -1046,7 +1060,8 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
         if !is_lokalvault_managed_agents(&existing) {
             return Err(
                 "AGENTS.md already exists and was not generated by LokalVault; refusing to overwrite"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             );
         }
     }
@@ -1075,14 +1090,12 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
     ))
 }
 
-pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
+pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, AppError> {
     let output_path = output
         .map(ToString::to_string)
         .unwrap_or_else(|| format!("{project}.lve"));
     if Path::new(&output_path).exists() {
-        return Err(format!(
-            "refusing to overwrite existing file: {output_path}"
-        ));
+        return Err(format!("refusing to overwrite existing file: {output_path}").into());
     }
     let share_password = prompt_password("Share password: ")?;
     let secrets = get_project_secret_map_with_method(project, Some(SHARE_BUNDLE_EXPORT_METHOD))?;
@@ -1112,7 +1125,7 @@ pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> 
     ))
 }
 
-pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
+pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, AppError> {
     let share_password = prompt_password("Share password: ")?;
     let payload: ShareBundlePayload =
         serde_json::from_value(read_lve_file(path, &share_password)?).map_err(|e| e.to_string())?;
@@ -1137,7 +1150,7 @@ pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
     ))
 }
 
-pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String> {
+pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, AppError> {
     let project = resolve_project(project)?;
     let matches = if is_daemon_running() {
         let response = send_ipc_request(json!({
@@ -1173,10 +1186,11 @@ pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String
     Err(format!(
         "Blocked: staged diff contains secret values for keys: {}",
         matches.join(", ")
-    ))
+    )
+    .into())
 }
 
-pub fn cmd_protect_repo(project: Option<&str>) -> Result<String, String> {
+pub fn cmd_protect_repo(project: Option<&str>) -> Result<String, AppError> {
     let hook_path = git_hook_path()?;
     if hook_path.exists() {
         let existing = fs::read_to_string(&hook_path).map_err(|e| e.to_string())?;
@@ -1184,7 +1198,8 @@ pub fn cmd_protect_repo(project: Option<&str>) -> Result<String, String> {
             return Err(format!(
                 "refusing to overwrite existing non-LokalVault hook at {}",
                 hook_path.display()
-            ));
+            )
+            .into());
         }
     }
 
@@ -1210,23 +1225,25 @@ pub fn cmd_protect_repo(project: Option<&str>) -> Result<String, String> {
     ))
 }
 
-fn resolve_project(project: Option<&str>) -> Result<String, String> {
+fn resolve_project(project: Option<&str>) -> Result<String, AppError> {
     match project {
         Some(project) => Ok(project.to_string()),
         None => get_project_from_config()?.ok_or_else(|| {
-            "no project specified - run lokalvault init or pass --project".to_string()
+            AppError::ValidationError(
+                "no project specified - run lokalvault init or pass --project".to_string(),
+            )
         }),
     }
 }
 
-fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, String> {
+fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, AppError> {
     get_project_secret_map_with_method(project, None)
 }
 
 fn get_project_secret_map_with_method(
     project: &str,
     method: Option<&str>,
-) -> Result<HashMap<String, String>, String> {
+) -> Result<HashMap<String, String>, AppError> {
     if is_daemon_running() {
         let mut request = json!({ "type": "get_all_secrets", "project": project });
         if let Some(method) = method {
@@ -1251,12 +1268,12 @@ fn get_project_secret_map_with_method(
     }
 
     let password = prompt_password("Master password: ")?;
-    let vault = unlock_vault(&password).map_err(|e| e.to_string())?;
+    let vault = unlock_vault(&password)?;
     let project_entry = vault
         .projects
         .iter()
         .find(|entry| entry.name == project)
-        .ok_or_else(|| format!("project not found: {project}"))?;
+        .ok_or_else(|| AppError::ProjectNotFound(project.to_string()))?;
     Ok(project_entry
         .secrets
         .iter()
@@ -1267,7 +1284,7 @@ fn get_project_secret_map_with_method(
 fn import_bundle_into_daemon(
     project: &str,
     secrets: &[ShareBundleSecret],
-) -> Result<ClaimImportResult, String> {
+) -> Result<ClaimImportResult, AppError> {
     let response = send_sensitive_ipc_request(
         json!({
             "type": "upsert_secrets_batch",
@@ -1291,10 +1308,10 @@ fn import_bundle_offline(
     password: &str,
     project: &str,
     secrets: &[ShareBundleSecret],
-) -> Result<ClaimImportResult, String> {
-    let mut vault = unlock_vault(password).map_err(|e| e.to_string())?;
+) -> Result<ClaimImportResult, AppError> {
+    let mut vault = unlock_vault(password)?;
     if !vault.projects.iter().any(|entry| entry.name == project) {
-        add_project(&mut vault, project).map_err(|e| e.to_string())?;
+        add_project(&mut vault, project)?;
     }
 
     let mut existing_keys = vault
@@ -1316,12 +1333,10 @@ fn import_bundle_offline(
 
     for secret in secrets {
         if existing_keys.contains(&secret.key) {
-            update_secret(&mut vault, project, &secret.key, &secret.value)
-                .map_err(|e| e.to_string())?;
+            update_secret(&mut vault, project, &secret.key, &secret.value)?;
             result.updated += 1;
         } else {
-            add_secret(&mut vault, project, &secret.key, &secret.value)
-                .map_err(|e| e.to_string())?;
+            add_secret(&mut vault, project, &secret.key, &secret.value)?;
             existing_keys.insert(secret.key.clone());
             result.added += 1;
         }
@@ -1331,7 +1346,7 @@ fn import_bundle_offline(
     Ok(result)
 }
 
-fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, String> {
+fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, AppError> {
     let mut request = json!({
         "type": "create_action_approval",
         "scope": scope,
@@ -1346,30 +1361,35 @@ fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, 
     response["approval_id"]
         .as_str()
         .map(ToString::to_string)
-        .ok_or_else(|| "daemon response missing approval_id".to_string())
+        .ok_or_else(|| AppError::InvalidResponse("daemon response missing approval_id".to_string()))
 }
 
-fn resolve_action_approval(approval_id: &str, approved: bool) -> Result<(), String> {
+fn submit_terminal_action_approval(approval_id: &str, approved: bool) -> Result<String, AppError> {
     let response = send_ipc_request(json!({
-        "type": "approve_action_request",
+        "type": "submit_action_approval",
         "approval_id": approval_id,
         "approved": approved,
     }))?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok(());
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
     }
-    Err(response_error(&response))
+    response["approval_proof"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            AppError::InvalidResponse("daemon response missing approval_proof".to_string())
+        })
 }
 
 fn register_action_token(
     scope: &str,
     project: Option<&str>,
-    approval_id: &str,
-) -> Result<String, String> {
+    approval_proof: &str,
+) -> Result<String, AppError> {
     let mut request = json!({
         "type": "register_action_token",
         "scope": scope,
-        "approval_id": approval_id,
+        "approval_proof": approval_proof,
     });
     if let Some(project) = project {
         request["project"] = serde_json::Value::String(project.to_string());
@@ -1381,7 +1401,9 @@ fn register_action_token(
     response["action_token"]
         .as_str()
         .map(ToString::to_string)
-        .ok_or_else(|| "daemon response missing action_token".to_string())
+        .ok_or_else(|| {
+            AppError::InvalidResponse("daemon response missing action_token".to_string())
+        })
 }
 
 fn send_sensitive_ipc_request(
@@ -1389,29 +1411,32 @@ fn send_sensitive_ipc_request(
     scope: &str,
     project: Option<&str>,
     action_preview: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let approval_project = project.unwrap_or("lokalvault");
     let approval_id = create_action_approval(scope, project)?;
     let approved = crate::run_cmd::show_pin_dialog(approval_project, action_preview)?;
-    resolve_action_approval(&approval_id, approved)?;
     if !approved {
-        return Err(format!("approval denied for {action_preview}"));
+        let _ = submit_terminal_action_approval(&approval_id, false);
+        return Err(AppError::ApprovalDenied(format!(
+            "approval denied for {action_preview}"
+        )));
     }
-    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_id)
+    let approval_proof = submit_terminal_action_approval(&approval_id, true)?;
+    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_proof)
 }
 
 fn send_sensitive_ipc_request_with_approval(
     mut request: serde_json::Value,
     scope: &str,
     project: Option<&str>,
-    approval_id: &str,
-) -> Result<serde_json::Value, String> {
-    let action_token = register_action_token(scope, project, approval_id)?;
+    approval_proof: &str,
+) -> Result<serde_json::Value, AppError> {
+    let action_token = register_action_token(scope, project, approval_proof)?;
     request["action_token"] = serde_json::Value::String(action_token);
     send_ipc_request(request)
 }
 
-fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, String> {
+fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, AppError> {
     let Some(config) = read_project_config()? else {
         return Ok(None);
     };
@@ -1428,7 +1453,7 @@ fn apply_bundle_manifest(
     manifest: Option<&ShareBundleManifest>,
     bundle_project: &str,
     project_name: &str,
-) -> Result<ClaimManifestResult, String> {
+) -> Result<ClaimManifestResult, AppError> {
     let Some(manifest) = manifest else {
         return Ok(ClaimManifestResult::NoManifest);
     };
@@ -1462,8 +1487,8 @@ fn apply_bundle_manifest(
     }
 }
 
-fn log_share_bundle_event(project: &str, method: &str) -> Result<(), String> {
-    log_access_event(AccessEvent {
+fn log_share_bundle_event(project: &str, method: &str) -> Result<(), AppError> {
+    Ok(log_access_event(AccessEvent {
         timestamp: chrono::Utc::now().to_rfc3339(),
         process_name: current_process_name(),
         exe_path: current_exe_path(),
@@ -1471,7 +1496,7 @@ fn log_share_bundle_event(project: &str, method: &str) -> Result<(), String> {
         key: SHARE_BUNDLE_SENTINEL_KEY.to_string(),
         method: method.to_string(),
         last_updated_at: None,
-    })
+    })?)
 }
 
 fn find_matching_secret_keys_in_project(
@@ -1561,12 +1586,8 @@ fn is_lokalvault_managed_agents(contents: &str) -> bool {
     )
 }
 
-fn response_error(response: &serde_json::Value) -> String {
-    response
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown daemon error")
-        .to_string()
+fn response_error(response: &serde_json::Value) -> AppError {
+    AppError::from_daemon_response(response)
 }
 
 fn count_stale_secret_keys(

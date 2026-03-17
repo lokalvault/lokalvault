@@ -1,4 +1,5 @@
 use crate::crypto::{decrypt, derive_key_with_params, encrypt, generate_nonce, generate_salt};
+use crate::errors::AppError;
 use crate::settings::read_settings;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -132,7 +133,7 @@ fn get_temp_vault_path(path: &Path) -> PathBuf {
 
 // ── Write ───────────────────────────────────────────────────────
 
-pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
+pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), AppError> {
     let salt = generate_salt();
     let nonce = generate_nonce();
     let settings = read_settings();
@@ -144,7 +145,7 @@ pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
         settings.argon2_parallelism,
     )?;
 
-    let json = serde_json::to_vec(vault).map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec(vault)?;
     let ciphertext = encrypt(&json, &key, &nonce)?;
 
     let mut bytes = Vec::new();
@@ -157,46 +158,53 @@ pub fn write_vault(vault: &VaultData, password: &str) -> Result<(), String> {
     // Atomic write: write temp → fsync → rename over original
     let path = get_vault_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)?;
     }
     let tmp_path = get_temp_vault_path(&path);
-    let mut file = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&tmp_path)?;
     if let Err(error) = std::io::Write::write_all(&mut file, &bytes) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(error.to_string());
+        return Err(AppError::IoError(error.to_string()));
     }
     if let Err(error) = file.sync_all() {
         let _ = fs::remove_file(&tmp_path);
-        return Err(error.to_string());
+        return Err(AppError::IoError(error.to_string()));
     }
     drop(file);
-    fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
+    fs::rename(&tmp_path, &path)?;
 
     Ok(())
 }
 
 // ── Read ────────────────────────────────────────────────────────
 
-pub fn read_vault(password: &str) -> Result<VaultData, String> {
-    let bytes = fs::read(get_vault_path()).map_err(|e| e.to_string())?;
+pub fn read_vault(password: &str) -> Result<VaultData, AppError> {
+    let bytes = fs::read(get_vault_path()).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => AppError::VaultNotFound,
+        _ => AppError::IoError(error.to_string()),
+    })?;
 
     // Validate magic
     if bytes.len() < 49 {
-        return Err("vault file too small — corrupted?".to_string());
+        return Err(AppError::VaultCorrupted(
+            "vault file too small — corrupted?".to_string(),
+        ));
     }
     if &bytes[0..4] != MAGIC {
-        return Err("not a LokalVault file".to_string());
+        return Err(AppError::VaultCorrupted(
+            "not a LokalVault file".to_string(),
+        ));
     }
     if bytes[4] != VERSION {
-        return Err(format!("unsupported vault version: {}", bytes[4]));
+        return Err(AppError::UnsupportedVaultVersion(bytes[4]));
     }
 
     let salt: [u8; 32] = bytes[5..37]
         .try_into()
-        .map_err(|_| "vault file corrupted: invalid salt".to_string())?;
+        .map_err(|_| AppError::VaultCorrupted("vault file corrupted: invalid salt".to_string()))?;
     let nonce: [u8; 12] = bytes[37..49]
         .try_into()
-        .map_err(|_| "vault file corrupted: invalid nonce".to_string())?;
+        .map_err(|_| AppError::VaultCorrupted("vault file corrupted: invalid nonce".to_string()))?;
     let ciphertext: &[u8] = &bytes[49..];
 
     let settings = read_settings();
@@ -207,9 +215,9 @@ pub fn read_vault(password: &str) -> Result<VaultData, String> {
         settings.argon2_iterations,
         settings.argon2_parallelism,
     )?;
-    let plaintext = decrypt(ciphertext, &key, &nonce)?;
+    let plaintext = decrypt(ciphertext, &key, &nonce).map_err(AppError::CryptoError)?;
 
-    serde_json::from_slice(&plaintext).map_err(|e| e.to_string())
+    serde_json::from_slice(&plaintext).map_err(AppError::from)
 }
 
 // ── Tests ───────────────────────────────────────────────────────
@@ -284,6 +292,49 @@ mod tests {
         assert_eq!(&raw[0..4], b"LKVT");
         assert_eq!(raw[4], 0x01);
         println!("✓ magic bytes and version correct");
+        cleanup_test_dir("unit");
+    }
+
+    #[test]
+    fn test_read_vault_reports_unsupported_version() {
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
+
+        let path = get_vault_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut bytes = vec![0u8; 49];
+        bytes[0..4].copy_from_slice(b"LKVT");
+        bytes[4] = 2;
+        fs::write(&path, bytes).unwrap();
+
+        let result = read_vault("password");
+        assert_eq!(result.unwrap_err(), AppError::UnsupportedVaultVersion(2));
+        cleanup_test_dir("unit");
+    }
+
+    #[test]
+    fn test_read_vault_reports_invalid_magic_as_corruption() {
+        let _guard = DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        cleanup_test_dir("unit");
+        setup_test_dir("unit");
+
+        let path = get_vault_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut bytes = vec![0u8; 49];
+        bytes[0..4].copy_from_slice(b"BAD!");
+        bytes[4] = 1;
+        fs::write(&path, bytes).unwrap();
+
+        let result = read_vault("password");
+        assert_eq!(
+            result.unwrap_err(),
+            AppError::VaultCorrupted("not a LokalVault file".to_string())
+        );
         cleanup_test_dir("unit");
     }
 }
