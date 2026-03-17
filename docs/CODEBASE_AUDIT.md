@@ -18,12 +18,12 @@ It is intended to drive implementation work, not just record findings.
 
 - `src/daemon.rs`
 - Sensitive requests now require scoped single-use `action_token`s, and token
-  minting now depends on a daemon-tracked approval request that is bound to the
-  caller PID/UID, scope, and project.
+  minting now depends on a daemon-tracked approval session plus a single-use
+  approval proof bound to the caller PID/UID, scope, and project.
 - Impact: any local process running as the same user can still mint an action
-  approval and then read or mutate the unlocked vault through the socket,
-  because approval resolution is still same-UID IPC rather than a daemon-owned
-  human-verification boundary.
+  approval proof and then read or mutate the unlocked vault through the socket,
+  because the transitional terminal approval capture still lives in the CLI
+  rather than a daemon-owned human-verification boundary.
 - Status: `partially mitigated on current branch`
 - Planned fix phase: `Phase 3`
 

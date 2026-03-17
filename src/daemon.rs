@@ -926,7 +926,7 @@ fn consume_action_approval_session(
     approval_id: &str,
     peer_uid: u32,
     peer_pid: u32,
- ) -> Result<ActionApprovalRecord, String> {
+) -> Result<ActionApprovalRecord, String> {
     let mut action_approval_session_store = state
         .action_approval_session_store
         .lock()
@@ -1544,7 +1544,14 @@ fn handle_ipc_request(
             let scope = ActionScope::parse(scope)?;
             let project = request.get("project").and_then(serde_json::Value::as_str);
             let approval_id = generate_token();
-            create_action_approval_session(state, &approval_id, peer_uid, peer_pid, scope, project)?;
+            create_action_approval_session(
+                state,
+                &approval_id,
+                peer_uid,
+                peer_pid,
+                scope,
+                project,
+            )?;
             json!({ "ok": true, "approval_id": approval_id })
         }
         "submit_action_approval" => {
