@@ -1,8 +1,10 @@
-use crate::audit_log::{AuditFilter, clear_audit_log, read_audit_log};
+use crate::audit_log::{
+    AccessEvent, AuditFilter, clear_audit_log, log_access_event, read_audit_log,
+};
 use crate::ipc_client::{get_socket_path, is_daemon_running, send_ipc_request};
 use crate::run_cmd::{
     ProjectConfig, configure_interactive_shell, get_project_from_config, inject_secrets_into_env,
-    read_project_config, shell_program, write_project_config,
+    merge_project_config_manifest, read_project_config, shell_program, write_project_config,
 };
 use crate::settings::{Settings, read_settings, write_settings};
 use crate::vault_file::{VaultData, get_vault_path};
@@ -11,6 +13,7 @@ use crate::vault_ops::{
     list_projects, list_secret_keys, unlock_vault, update_secret,
 };
 use rpassword::read_password;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -22,15 +25,59 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
-#[cfg(test)]
 static TEST_PASSWORDS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 
 const LOKALVAULT_MANAGED_AGENTS_MARKER: &str = "<!-- lokalvault-managed:agents -->";
+const SHARE_BUNDLE_SENTINEL_KEY: &str = "__share_bundle__";
+const SHARE_BUNDLE_CREATED_METHOD: &str = "share_bundle_created";
+const SHARE_BUNDLE_CLAIMED_METHOD: &str = "share_bundle_claimed";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundleManifest {
+    required: Vec<String>,
+    optional: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundleSecret {
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ShareBundlePayload {
+    project: String,
+    shared_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<ShareBundleManifest>,
+    secrets: Vec<ShareBundleSecret>,
+}
+
+enum ClaimManifestResult {
+    Wrote,
+    Merged,
+    SkippedConflict,
+    SkippedProjectOverride,
+    NoManifest,
+}
+
+impl ClaimManifestResult {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Wrote => "✓ Wrote .lokalvault",
+            Self::Merged => "✓ Merged .lokalvault",
+            Self::SkippedConflict => "✓ Skipped setup due to conflicting .lokalvault project",
+            Self::SkippedProjectOverride => {
+                "✓ Skipped setup because --project overrides the shared project"
+            }
+            Self::NoManifest => "✓ No project setup metadata in bundle",
+        }
+    }
+}
 
 pub enum ExportFormat {
     Dotenv,
@@ -78,7 +125,6 @@ pub fn prompt_password(prompt: &str) -> Result<String, String> {
     eprint!("{prompt}");
     io::stderr().flush().map_err(|e| e.to_string())?;
 
-    #[cfg(test)]
     {
         let passwords = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
         let mut passwords = passwords.lock().map_err(|e| e.to_string())?;
@@ -1014,34 +1060,43 @@ pub fn cmd_ai_safe(project: Option<&str>, generate_example: bool) -> Result<Stri
 pub fn cmd_share(project: &str, output: Option<&str>) -> Result<String, String> {
     let share_password = prompt_password("Share password: ")?;
     let secrets = get_project_secret_map(project)?;
-
-    let payload = serde_json::json!({
-        "project": project,
-        "shared_at": chrono::Utc::now().to_rfc3339(),
-        "secrets": secrets
+    let manifest = current_project_manifest(project)?;
+    let payload = ShareBundlePayload {
+        project: project.to_string(),
+        shared_at: chrono::Utc::now().to_rfc3339(),
+        manifest: manifest.clone(),
+        secrets: secrets
             .into_iter()
-            .map(|(key, value)| json!({ "key": key, "value": value }))
-            .collect::<Vec<_>>()
-    });
+            .map(|(key, value)| ShareBundleSecret { key, value })
+            .collect(),
+    };
     let output_path = output
         .map(ToString::to_string)
         .unwrap_or_else(|| format!("{project}.lve"));
-    write_lve_file(Path::new(&output_path), &share_password, &payload)?;
-    Ok(format!("✓ Created {output_path}"))
+    write_lve_file(
+        Path::new(&output_path),
+        &share_password,
+        &serde_json::to_value(&payload).map_err(|e| e.to_string())?,
+    )?;
+    log_share_bundle_event(project, SHARE_BUNDLE_CREATED_METHOD)?;
+    Ok(format!(
+        "✓ Created {output_path}\n{}",
+        if manifest.is_some() {
+            "✓ Included project setup from .lokalvault"
+        } else {
+            "✓ No matching .lokalvault found; bundle contains secrets only"
+        }
+    ))
 }
 
 pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
     let share_password = prompt_password("Share password: ")?;
-    let payload = read_lve_file(path, &share_password)?;
+    let payload: ShareBundlePayload =
+        serde_json::from_value(read_lve_file(path, &share_password)?).map_err(|e| e.to_string())?;
+    let bundle_project = payload.project.clone();
     let project_name = project
         .map(ToString::to_string)
-        .or_else(|| {
-            payload
-                .get("project")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .ok_or_else(|| "missing project in share payload".to_string())?;
+        .unwrap_or_else(|| bundle_project.clone());
 
     let password = prompt_password("Master password: ")?;
     let mut vault = unlock_vault(&password).map_err(|e| e.to_string())?;
@@ -1053,27 +1108,21 @@ pub fn cmd_claim(path: &Path, project: Option<&str>) -> Result<String, String> {
         add_project(&mut vault, &project_name).map_err(|e| e.to_string())?;
     }
 
-    let secrets = payload
-        .get("secrets")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "missing secrets in share payload".to_string())?;
     let mut imported = 0usize;
-    for secret in secrets {
-        let key = secret
-            .get("key")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing key in share payload".to_string())?;
-        let value = secret
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing value in share payload".to_string())?;
-        if add_secret(&mut vault, &project_name, key, value).is_ok() {
+    for secret in &payload.secrets {
+        if add_secret(&mut vault, &project_name, &secret.key, &secret.value).is_ok() {
             imported += 1;
         }
     }
 
     crate::vault_file::write_vault(&vault, &password)?;
-    Ok(format!("✓ Imported {imported} secrets into {project_name}"))
+    let manifest_result =
+        apply_bundle_manifest(payload.manifest.as_ref(), &bundle_project, &project_name)?;
+    log_share_bundle_event(&project_name, SHARE_BUNDLE_CLAIMED_METHOD)?;
+    Ok(format!(
+        "✓ Imported {imported} secrets into {project_name}\n{}",
+        manifest_result.message()
+    ))
 }
 
 pub fn cmd_scan_diff(project: Option<&str>, diff: &str) -> Result<String, String> {
@@ -1187,6 +1236,69 @@ fn get_project_secret_map(project: &str) -> Result<HashMap<String, String>, Stri
         .collect())
 }
 
+fn current_project_manifest(project: &str) -> Result<Option<ShareBundleManifest>, String> {
+    let Some(config) = read_project_config()? else {
+        return Ok(None);
+    };
+    if config.project.name != project {
+        return Ok(None);
+    }
+    Ok(Some(ShareBundleManifest {
+        required: config.keys.required,
+        optional: config.keys.optional,
+    }))
+}
+
+fn apply_bundle_manifest(
+    manifest: Option<&ShareBundleManifest>,
+    bundle_project: &str,
+    project_name: &str,
+) -> Result<ClaimManifestResult, String> {
+    let Some(manifest) = manifest else {
+        return Ok(ClaimManifestResult::NoManifest);
+    };
+    if bundle_project != project_name {
+        return Ok(ClaimManifestResult::SkippedProjectOverride);
+    }
+
+    let existing = read_project_config()?;
+    match existing {
+        None => {
+            let config = merge_project_config_manifest(
+                None,
+                bundle_project,
+                &manifest.required,
+                &manifest.optional,
+            );
+            write_project_config(&config)?;
+            Ok(ClaimManifestResult::Wrote)
+        }
+        Some(existing) if existing.project.name == bundle_project => {
+            let config = merge_project_config_manifest(
+                Some(existing),
+                bundle_project,
+                &manifest.required,
+                &manifest.optional,
+            );
+            write_project_config(&config)?;
+            Ok(ClaimManifestResult::Merged)
+        }
+        Some(_) => Ok(ClaimManifestResult::SkippedConflict),
+    }
+}
+
+fn log_share_bundle_event(project: &str, method: &str) -> Result<(), String> {
+    log_access_event(AccessEvent {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        process_name: current_process_name(),
+        exe_path: current_exe_path(),
+        project: project.to_string(),
+        key: SHARE_BUNDLE_SENTINEL_KEY.to_string(),
+        method: method.to_string(),
+        last_updated_at: None,
+    })
+}
+
 fn find_matching_secret_keys_in_project(
     project_entry: &crate::vault_file::Project,
     diff: &str,
@@ -1289,6 +1401,9 @@ fn count_stale_secret_keys(
     let cutoff = chrono::Utc::now() - chrono::Duration::days(stale_days);
     let mut latest = BTreeMap::new();
     for event in events {
+        if is_share_bundle_event(&event.method) {
+            continue;
+        }
         let timestamp = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
             .map_err(|e| e.to_string())?
             .with_timezone(&chrono::Utc);
@@ -1305,6 +1420,13 @@ fn count_stale_secret_keys(
         .values()
         .filter(|timestamp| **timestamp < cutoff)
         .count())
+}
+
+fn is_share_bundle_event(method: &str) -> bool {
+    matches!(
+        method,
+        SHARE_BUNDLE_CREATED_METHOD | SHARE_BUNDLE_CLAIMED_METHOD
+    )
 }
 
 fn get_setting_value(settings: &Settings, key: &str) -> Result<String, String> {
@@ -1523,10 +1645,42 @@ fn shell_quote(value: &str) -> String {
     format!("'{escaped}'")
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 pub fn push_test_passwords(passwords: &[&str]) {
     let queue = TEST_PASSWORDS.get_or_init(|| Mutex::new(Vec::new()));
     let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
     queue.clear();
     queue.extend(passwords.iter().map(|password| (*password).to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_event(method: &str, key: &str, age_days: i64) -> AccessEvent {
+        AccessEvent {
+            timestamp: (chrono::Utc::now() - chrono::Duration::days(age_days)).to_rfc3339(),
+            process_name: "lokalvault".to_string(),
+            exe_path: "/usr/bin/lokalvault".to_string(),
+            project: "my-app".to_string(),
+            key: key.to_string(),
+            method: method.to_string(),
+            last_updated_at: None,
+        }
+    }
+
+    #[test]
+    fn test_count_stale_secret_keys_ignores_share_bundle_events() {
+        let stale = count_stale_secret_keys(
+            &[
+                sample_event("share_bundle_created", SHARE_BUNDLE_SENTINEL_KEY, 31),
+                sample_event("share_bundle_claimed", SHARE_BUNDLE_SENTINEL_KEY, 31),
+                sample_event("run_env", "OLD_SECRET", 31),
+            ],
+            30,
+        )
+        .unwrap();
+
+        assert_eq!(stale, 1);
+    }
 }

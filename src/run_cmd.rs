@@ -210,6 +210,42 @@ pub fn write_project_config(config: &ProjectConfig) -> Result<(), String> {
     fs::write(".lokalvault", contents).map_err(|e| e.to_string())
 }
 
+pub fn merge_project_config_manifest(
+    existing: Option<ProjectConfig>,
+    project: &str,
+    required: &[String],
+    optional: &[String],
+) -> ProjectConfig {
+    let mut config = existing.unwrap_or_default();
+    config.project.name = project.to_string();
+    config.keys.required = dedupe_in_order(
+        config
+            .keys
+            .required
+            .into_iter()
+            .chain(required.iter().cloned()),
+    );
+    config.keys.optional = dedupe_in_order(
+        config
+            .keys
+            .optional
+            .into_iter()
+            .chain(optional.iter().cloned()),
+    );
+    config
+}
+
+fn dedupe_in_order(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value);
+        }
+    }
+    deduped
+}
+
 async fn run_with_real_daemon(
     project: &str,
     command: Vec<String>,
@@ -731,5 +767,52 @@ mod tests {
             secrets.get("OPENAI_KEY"),
             Some(&"test-value-123".to_string())
         );
+    }
+
+    #[test]
+    fn test_merge_project_config_manifest_writes_new_config() {
+        let config = merge_project_config_manifest(
+            None,
+            "my-app",
+            &["OPENAI_KEY".to_string(), "DATABASE_URL".to_string()],
+            &["STRIPE_KEY".to_string()],
+        );
+
+        assert_eq!(config.project.name, "my-app");
+        assert_eq!(config.keys.required, vec!["OPENAI_KEY", "DATABASE_URL"]);
+        assert_eq!(config.keys.optional, vec!["STRIPE_KEY"]);
+    }
+
+    #[test]
+    fn test_merge_project_config_manifest_preserves_order_and_dedupes() {
+        let config = merge_project_config_manifest(
+            Some(ProjectConfig {
+                project: ProjectSection {
+                    name: "old-project".to_string(),
+                },
+                keys: KeysSection {
+                    required: vec!["OPENAI_KEY".to_string(), "DATABASE_URL".to_string()],
+                    optional: vec!["OPTIONAL_ONE".to_string()],
+                },
+            }),
+            "my-app",
+            &[
+                "DATABASE_URL".to_string(),
+                "NEW_REQUIRED".to_string(),
+                "OPENAI_KEY".to_string(),
+            ],
+            &[
+                "OPTIONAL_ONE".to_string(),
+                "OPTIONAL_TWO".to_string(),
+                "OPTIONAL_TWO".to_string(),
+            ],
+        );
+
+        assert_eq!(config.project.name, "my-app");
+        assert_eq!(
+            config.keys.required,
+            vec!["OPENAI_KEY", "DATABASE_URL", "NEW_REQUIRED"]
+        );
+        assert_eq!(config.keys.optional, vec!["OPTIONAL_ONE", "OPTIONAL_TWO"]);
     }
 }

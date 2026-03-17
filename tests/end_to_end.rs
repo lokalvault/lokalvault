@@ -1,11 +1,13 @@
 use lokalvault::audit_log::{clear_audit_log, read_audit_log};
-use lokalvault::cli::ProjectTemplate;
+use lokalvault::cli::{self, ProjectTemplate};
 use lokalvault::daemon::{
     fetch_all_secrets_for_boundary, register_token_phase1, register_token_phase2, start_daemon,
 };
 use lokalvault::ipc_client::{get_socket_path, send_ipc_request};
-use lokalvault::run_cmd::{fetch_all_secrets as run_fetch_all_secrets, get_project_from_config};
-use lokalvault::vault_file::{Project, Secret, VaultData};
+use lokalvault::run_cmd::{
+    fetch_all_secrets as run_fetch_all_secrets, get_project_from_config, read_project_config,
+};
+use lokalvault::vault_file::{Project, Secret, VaultData, read_vault, write_vault};
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -61,6 +63,26 @@ fn shutdown_real_daemon(mut daemon: std::process::Child) {
     let _ = send_ipc_request(json!({ "type": "shutdown" }));
     let _ = daemon.wait();
     let _ = fs::remove_file(get_socket_path());
+}
+
+fn seed_vault(password: &str, project: &str, secrets: &[(&str, &str)]) {
+    let now = "2026-01-01T00:00:00Z".to_string();
+    let vault = VaultData {
+        version: 1,
+        projects: vec![Project {
+            name: project.to_string(),
+            secrets: secrets
+                .iter()
+                .map(|(key, value)| Secret {
+                    key: (*key).to_string(),
+                    value: zeroize::Zeroizing::new((*value).to_string()),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                })
+                .collect(),
+        }],
+    };
+    write_vault(&vault, password).unwrap();
 }
 
 #[test]
@@ -654,6 +676,234 @@ fn test_status_includes_session_expiry_and_stale_secret_summary() {
 
     assert!(effective.contains("Session expires in:"));
     assert!(effective.contains("Stale secrets: 1 secrets not accessed in 30+ days"));
+}
+
+#[test]
+fn test_share_claim_roundtrip_writes_manifest_and_audit_events() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+    clear_audit_log().unwrap();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(
+        password,
+        "my-app",
+        &[
+            ("OPENAI_KEY", "sk-test-123"),
+            ("DATABASE_URL", "postgres://db"),
+        ],
+    );
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(
+        sender.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = [\"DATABASE_URL\"]\n",
+    )
+    .unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    let share = cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+    assert!(share.contains("Included project setup"));
+
+    std::env::set_current_dir(&recipient).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    let claim = cli::cmd_claim(&bundle_path, None).unwrap();
+
+    let config = read_project_config().unwrap().unwrap();
+    assert_eq!(config.project.name, "my-app");
+    assert_eq!(config.keys.required, vec!["OPENAI_KEY"]);
+    assert_eq!(config.keys.optional, vec!["DATABASE_URL"]);
+    assert!(claim.contains("Wrote .lokalvault"));
+
+    let vault = read_vault(password).unwrap();
+    let project = vault
+        .projects
+        .iter()
+        .find(|project| project.name == "my-app")
+        .unwrap();
+    assert!(
+        project
+            .secrets
+            .iter()
+            .any(|secret| secret.key == "OPENAI_KEY")
+    );
+    assert!(
+        project
+            .secrets
+            .iter()
+            .any(|secret| secret.key == "DATABASE_URL")
+    );
+
+    let methods = read_audit_log(None)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.method)
+        .collect::<Vec<_>>();
+    assert!(methods.contains(&"share_bundle_created".to_string()));
+    assert!(methods.contains(&"share_bundle_claimed".to_string()));
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_claim_merges_existing_same_project_manifest() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-merge-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-merge-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(
+        sender.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\", \"DATABASE_URL\"]\noptional = [\"STRIPE_KEY\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        recipient.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = [\"OPTIONAL_ONE\"]\n",
+    )
+    .unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+
+    std::env::set_current_dir(&recipient).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    let claim = cli::cmd_claim(&bundle_path, None).unwrap();
+
+    let config = read_project_config().unwrap().unwrap();
+    assert!(claim.contains("Merged .lokalvault"));
+    assert_eq!(
+        config.keys.required,
+        vec!["OPENAI_KEY".to_string(), "DATABASE_URL".to_string()]
+    );
+    assert_eq!(
+        config.keys.optional,
+        vec!["OPTIONAL_ONE".to_string(), "STRIPE_KEY".to_string()]
+    );
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_claim_skips_conflicting_manifest_but_imports_secrets() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-conflict-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-conflict-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(
+        sender.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = []\n",
+    )
+    .unwrap();
+    let original_manifest =
+        "[project]\nname = \"other-app\"\n[keys]\nrequired = [\"OTHER_KEY\"]\noptional = []\n";
+    fs::write(recipient.join(".lokalvault"), original_manifest).unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+
+    std::env::set_current_dir(&recipient).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    let claim = cli::cmd_claim(&bundle_path, None).unwrap();
+
+    assert!(claim.contains("Skipped setup due to conflicting"));
+    assert_eq!(
+        fs::read_to_string(recipient.join(".lokalvault")).unwrap(),
+        original_manifest
+    );
+    let vault = read_vault(password).unwrap();
+    assert!(
+        vault
+            .projects
+            .iter()
+            .any(|project| project.name == "my-app")
+    );
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
+}
+
+#[test]
+fn test_claim_project_override_skips_manifest_write() {
+    let _guard = END_TO_END_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    setup_test_dir();
+
+    let password = "test-Strong-password-42!";
+    seed_vault(password, "my-app", &[("OPENAI_KEY", "sk-test-123")]);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    let sender = std::env::temp_dir().join("lokalvault-share-bundle-override-sender");
+    let recipient = std::env::temp_dir().join("lokalvault-share-bundle-override-recipient");
+    let bundle_path = sender.join("bundle.lve");
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    fs::create_dir_all(&sender).unwrap();
+    fs::create_dir_all(&recipient).unwrap();
+    fs::write(
+        sender.join(".lokalvault"),
+        "[project]\nname = \"my-app\"\n[keys]\nrequired = [\"OPENAI_KEY\"]\noptional = []\n",
+    )
+    .unwrap();
+
+    std::env::set_current_dir(&sender).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    cli::cmd_share("my-app", Some(bundle_path.to_string_lossy().as_ref())).unwrap();
+
+    std::env::set_current_dir(&recipient).unwrap();
+    cli::push_test_passwords(&["share-pass", password]);
+    let claim = cli::cmd_claim(&bundle_path, Some("renamed-app")).unwrap();
+
+    assert!(claim.contains("Skipped setup because --project overrides"));
+    assert!(!recipient.join(".lokalvault").exists());
+    let vault = read_vault(password).unwrap();
+    assert!(
+        vault
+            .projects
+            .iter()
+            .any(|project| project.name == "renamed-app")
+    );
+
+    std::env::set_current_dir(original_cwd).unwrap();
+    let _ = fs::remove_dir_all(&sender);
+    let _ = fs::remove_dir_all(&recipient);
+    cleanup_test_dir();
 }
 
 #[test]

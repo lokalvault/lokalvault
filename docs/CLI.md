@@ -110,8 +110,8 @@ lokalvault init --template stripe
 ### AI-safe and sharing workflows
 
 - `lokalvault ai-safe [--project <name>] [--generate-example]` — write `.lokalvault`, AI guidance, and gitignore protections
-- `lokalvault share <project> [--output file.lve]` — create an encrypted share bundle
-- `lokalvault claim <file.lve> [--project <name>]` — import a shared secret bundle
+- `lokalvault share <project> [--output file.lve]` — create an encrypted share bundle; includes `.lokalvault` key metadata when the current directory matches the shared project
+- `lokalvault claim <file.lve> [--project <name>]` — import a shared secret bundle; writes or merges `.lokalvault` only when the shared project matches the local target safely
 
 ### Repo protection
 
@@ -129,6 +129,8 @@ lokalvault init --template stripe
 - `lokalvault get` prints the secret value; prefer `lokalvault copy` when you only need to paste it elsewhere.
 - `lokalvault copy` never prints secret values.
 - `lokalvault diff .env` never prints secret values.
+- `lokalvault share` encrypts the bundle with a separate share password and may include project key metadata from `.lokalvault`.
+- `lokalvault claim` skips writing `.lokalvault` if the current directory already points at a different project or if `--project` overrides the shared project.
 - Clipboard clearing is best-effort.
 - Secret values are zeroized in daemon-owned memory where practical, but JSON IPC responses become plain strings at the daemon → CLI boundary.
 - `status` shows a session expiry estimate derived from daemon uptime and configured timeout.
