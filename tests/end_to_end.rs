@@ -68,10 +68,25 @@ fn spawn_real_daemon(vault: VaultData, password: &str) -> std::process::Child {
 }
 
 fn register_action_token(scope: &str, project: &str) -> String {
+    let approval = send_ipc_request(json!({
+        "type": "create_action_approval",
+        "scope": scope,
+        "project": project,
+    }))
+    .unwrap();
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    let approval = send_ipc_request(json!({
+        "type": "approve_action_request",
+        "approval_id": approval_id,
+        "approved": true,
+    }))
+    .unwrap();
+    assert_eq!(approval["ok"], true);
     let response = send_ipc_request(json!({
         "type": "register_action_token",
         "scope": scope,
         "project": project,
+        "approval_id": approval_id,
     }))
     .unwrap();
     response["action_token"].as_str().unwrap().to_string()
@@ -1149,13 +1164,7 @@ fn test_claim_updates_live_daemon_state() {
     let claim = cli::cmd_claim(&bundle_path, None).unwrap();
     assert!(claim.contains("updated 1"));
 
-    let action_token_response = send_ipc_request(json!({
-        "type": "register_action_token",
-        "scope": "secret_read",
-        "project": "my-app",
-    }))
-    .unwrap();
-    let action_token = action_token_response["action_token"].as_str().unwrap();
+    let action_token = register_action_token("secret_read", "my-app");
     let response = send_ipc_request(json!({
         "type": "get_secret",
         "project": "my-app",

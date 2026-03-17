@@ -499,8 +499,7 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
     }
 
     if is_daemon_running() {
-        approve_sensitive_action(project, &format!("import secrets into {project}"))?;
-        let mut imported = 0usize;
+        let mut imported_secrets = Vec::new();
         let mut skipped = 0usize;
         for raw_line in preview.lines() {
             let line = raw_line.trim();
@@ -511,27 +510,17 @@ pub fn cmd_import(path: &Path, project: &str) -> Result<String, String> {
                 skipped += 1;
                 continue;
             };
-            let response = send_sensitive_ipc_request_with_approval(
-                json!({
-                    "type": "add_secret",
-                    "project": project,
-                    "key": key.trim(),
-                    "value": value.trim(),
-                }),
-                ACTION_SCOPE_VAULT_MUTATE,
-                Some(project),
-            )?;
-            if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-                imported += 1;
-            } else {
-                skipped += 1;
-            }
+            imported_secrets.push(ShareBundleSecret {
+                key: key.trim().to_string(),
+                value: value.trim().to_string(),
+            });
         }
+        let import_result = import_bundle_into_daemon(project, &imported_secrets)?;
         let retired_path = retire_import_file(path)?;
         ensure_gitignore_contains(&retired_path)?;
         return Ok(format!(
             "✓ Imported {} secrets into {} (skipped {}) - retired to {}",
-            imported,
+            import_result.added + import_result.updated,
             project,
             skipped,
             retired_path.display()
@@ -1279,43 +1268,23 @@ fn import_bundle_into_daemon(
     project: &str,
     secrets: &[ShareBundleSecret],
 ) -> Result<ClaimImportResult, String> {
-    approve_sensitive_action(project, &format!("import shared secrets into {project}"))?;
-    let mut existing_keys = daemon_project_keys(project)?;
-    let mut result = ClaimImportResult {
-        added: 0,
-        updated: 0,
-    };
-
-    for secret in secrets {
-        let request = if existing_keys.contains(&secret.key) {
-            result.updated += 1;
-            json!({
-                "type": "update_secret",
-                "project": project,
-                "key": secret.key,
-                "value": secret.value,
-            })
-        } else {
-            result.added += 1;
-            existing_keys.insert(secret.key.clone());
-            json!({
-                "type": "add_secret",
-                "project": project,
-                "key": secret.key,
-                "value": secret.value,
-            })
-        };
-        let response = send_sensitive_ipc_request_with_approval(
-            request,
-            ACTION_SCOPE_VAULT_MUTATE,
-            Some(project),
-        )?;
-        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(response_error(&response));
-        }
+    let response = send_sensitive_ipc_request(
+        json!({
+            "type": "upsert_secrets_batch",
+            "project": project,
+            "secrets": secrets,
+        }),
+        ACTION_SCOPE_VAULT_MUTATE,
+        Some(project),
+        &format!("import shared secrets into {project}"),
+    )?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
     }
-
-    Ok(result)
+    Ok(ClaimImportResult {
+        added: response["added"].as_u64().unwrap_or(0) as usize,
+        updated: response["updated"].as_u64().unwrap_or(0) as usize,
+    })
 }
 
 fn import_bundle_offline(
@@ -1362,36 +1331,45 @@ fn import_bundle_offline(
     Ok(result)
 }
 
-fn daemon_project_keys(project: &str) -> Result<HashSet<String>, String> {
-    let response = send_ipc_request(json!({ "type": "list_keys", "project": project }))?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok(response["keys"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(ToString::to_string)
-            .collect());
+fn create_action_approval(scope: &str, project: Option<&str>) -> Result<String, String> {
+    let mut request = json!({
+        "type": "create_action_approval",
+        "scope": scope,
+    });
+    if let Some(project) = project {
+        request["project"] = serde_json::Value::String(project.to_string());
     }
-
-    let error = response_error(&response);
-    if error.contains("project not found") {
-        return Ok(HashSet::new());
+    let response = send_ipc_request(request)?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response_error(&response));
     }
-    Err(error)
+    response["approval_id"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| "daemon response missing approval_id".to_string())
 }
 
-fn approve_sensitive_action(project: &str, action_preview: &str) -> Result<(), String> {
-    if crate::run_cmd::show_pin_dialog(project, action_preview)? {
+fn resolve_action_approval(approval_id: &str, approved: bool) -> Result<(), String> {
+    let response = send_ipc_request(json!({
+        "type": "approve_action_request",
+        "approval_id": approval_id,
+        "approved": approved,
+    }))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
         return Ok(());
     }
-    Err(format!("approval denied for {action_preview}"))
+    Err(response_error(&response))
 }
 
-fn register_action_token(scope: &str, project: Option<&str>) -> Result<String, String> {
+fn register_action_token(
+    scope: &str,
+    project: Option<&str>,
+    approval_id: &str,
+) -> Result<String, String> {
     let mut request = json!({
         "type": "register_action_token",
         "scope": scope,
+        "approval_id": approval_id,
     });
     if let Some(project) = project {
         request["project"] = serde_json::Value::String(project.to_string());
@@ -1413,16 +1391,22 @@ fn send_sensitive_ipc_request(
     action_preview: &str,
 ) -> Result<serde_json::Value, String> {
     let approval_project = project.unwrap_or("lokalvault");
-    approve_sensitive_action(approval_project, action_preview)?;
-    send_sensitive_ipc_request_with_approval(request, scope, project)
+    let approval_id = create_action_approval(scope, project)?;
+    let approved = crate::run_cmd::show_pin_dialog(approval_project, action_preview)?;
+    resolve_action_approval(&approval_id, approved)?;
+    if !approved {
+        return Err(format!("approval denied for {action_preview}"));
+    }
+    send_sensitive_ipc_request_with_approval(request, scope, project, &approval_id)
 }
 
 fn send_sensitive_ipc_request_with_approval(
     mut request: serde_json::Value,
     scope: &str,
     project: Option<&str>,
+    approval_id: &str,
 ) -> Result<serde_json::Value, String> {
-    let action_token = register_action_token(scope, project)?;
+    let action_token = register_action_token(scope, project, approval_id)?;
     request["action_token"] = serde_json::Value::String(action_token);
     send_ipc_request(request)
 }

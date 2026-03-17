@@ -17,11 +17,13 @@ It is intended to drive implementation work, not just record findings.
 ### P0 — Same-UID daemon IPC is effectively unauthenticated
 
 - `src/daemon.rs`
-- Sensitive requests now require scoped single-use `action_token`s, but
-  `register_action_token` itself is still granted after only the same-UID
-  socket check and rate limit.
+- Sensitive requests now require scoped single-use `action_token`s, and token
+  minting now depends on a daemon-tracked approval request that is bound to the
+  caller PID/UID, scope, and project.
 - Impact: any local process running as the same user can still mint an action
-  token and then read or mutate the unlocked vault through the socket.
+  approval and then read or mutate the unlocked vault through the socket,
+  because approval resolution is still same-UID IPC rather than a daemon-owned
+  human-verification boundary.
 - Status: `partially mitigated on current branch`
 - Planned fix phase: `Phase 3`
 
@@ -65,10 +67,9 @@ It is intended to drive implementation work, not just record findings.
 
 - `src/cli.rs`
 - `src/daemon.rs`
-- Each daemon-backed import or claim mutation now performs one IPC request to
-  mint an action token and a second IPC request to apply the mutation.
-- Impact: larger dotenv imports or share bundles can hit the daemon rate limit
-  and fail partway through the command.
+- Status: `fixed on current branch`
+- Daemon-backed import and claim now batch upserts into a single mutation
+  request instead of per-key token+mutation request pairs.
 - Planned fix phase: `Phase 3`
 
 ### P1 — The checked-in test suite is red and can hang in POC socket tests

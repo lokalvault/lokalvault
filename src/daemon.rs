@@ -30,6 +30,7 @@ use crate::vault_ops::{
 pub const POC_SOCKET_PATH: &str = "/tmp/lokalvault-test.sock";
 const PHASE1_PENDING_WINDOW: Duration = Duration::from_millis(1000);
 const ACTION_TOKEN_WINDOW: Duration = Duration::from_secs(30);
+const ACTION_APPROVAL_WINDOW: Duration = Duration::from_secs(30);
 const MACOS_RATE_LIMIT_PID_OFFSET: u32 = 1_000_000_000;
 const TEST_POC_SOCKET_ENV: &str = "LOKALVAULT_TEST_POC_SOCKET";
 
@@ -80,10 +81,21 @@ struct ActionTokenRecord {
     deadline: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct ActionApprovalRecord {
+    uid: u32,
+    pid: Option<u32>,
+    project: Option<String>,
+    scope: ActionScope,
+    approved: bool,
+    deadline: Instant,
+}
+
 #[derive(Clone)]
 pub struct DaemonState {
     vault: Arc<Mutex<VaultData>>,
     token_store: Arc<Mutex<Vec<(String, TokenRecord)>>>,
+    action_approval_store: Arc<Mutex<Vec<(String, ActionApprovalRecord)>>>,
     action_token_store: Arc<Mutex<Vec<(String, ActionTokenRecord)>>>,
     password: Arc<Mutex<Zeroizing<String>>>,
     last_activity: Arc<Mutex<Instant>>,
@@ -265,6 +277,7 @@ pub fn start_daemon_with_password(vault_data: VaultData, password: String) -> Da
     DaemonState {
         vault: Arc::new(Mutex::new(vault_data)),
         token_store: Arc::new(Mutex::new(Vec::new())),
+        action_approval_store: Arc::new(Mutex::new(Vec::new())),
         action_token_store: Arc::new(Mutex::new(Vec::new())),
         password: Arc::new(Mutex::new(Zeroizing::new(password))),
         last_activity: Arc::new(Mutex::new(Instant::now())),
@@ -390,7 +403,9 @@ fn register_action_token(
     pid: u32,
     scope: ActionScope,
     project: Option<&str>,
+    approval_id: &str,
 ) -> Result<(), String> {
+    consume_action_approval(state, approval_id, uid, pid, scope, project)?;
     let mut action_token_store = state.action_token_store.lock().map_err(|e| e.to_string())?;
     action_token_store.push((
         token.to_string(),
@@ -402,6 +417,71 @@ fn register_action_token(
             deadline: Instant::now() + ACTION_TOKEN_WINDOW,
         },
     ));
+    Ok(())
+}
+
+fn create_action_approval(
+    state: &DaemonState,
+    approval_id: &str,
+    uid: u32,
+    pid: u32,
+    scope: ActionScope,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let mut action_approval_store = state
+        .action_approval_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    action_approval_store.push((
+        approval_id.to_string(),
+        ActionApprovalRecord {
+            uid,
+            pid: normalized_peer_pid(pid),
+            project: project.map(ToString::to_string),
+            scope,
+            approved: false,
+            deadline: Instant::now() + ACTION_APPROVAL_WINDOW,
+        },
+    ));
+    Ok(())
+}
+
+fn resolve_action_approval(
+    state: &DaemonState,
+    approval_id: &str,
+    uid: u32,
+    pid: u32,
+    approved: bool,
+) -> Result<(), String> {
+    let mut action_approval_store = state
+        .action_approval_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let index = action_approval_store
+        .iter()
+        .position(|(stored_id, _)| constant_time_compare(stored_id, approval_id))
+        .ok_or_else(|| "approval request invalid".to_string())?;
+    let record = &mut action_approval_store[index].1;
+
+    if Instant::now() > record.deadline {
+        action_approval_store.remove(index);
+        return Err("approval request expired".to_string());
+    }
+    if record.uid != uid {
+        return Err("approval request uid mismatch".to_string());
+    }
+    if let Some(expected_pid) = record.pid
+        && normalized_peer_pid(pid) != Some(expected_pid)
+    {
+        return Err("approval request pid mismatch".to_string());
+    }
+    if !approved {
+        action_approval_store.remove(index);
+        return Err("approval denied".to_string());
+    }
+
+    record.approved = true;
+    record.deadline = Instant::now() + ACTION_APPROVAL_WINDOW;
     Ok(())
 }
 
@@ -642,6 +722,50 @@ pub fn update_secret_in_state(
     Ok(())
 }
 
+fn upsert_secrets_batch_in_state(
+    state: &DaemonState,
+    project: &str,
+    secrets: &[(String, String)],
+) -> Result<(usize, usize), String> {
+    let password = get_password(state)?;
+    let mut vault = state.vault.lock().map_err(|e| e.to_string())?;
+    let mut candidate = vault.clone();
+
+    if !candidate.projects.iter().any(|entry| entry.name == project) {
+        add_project(&mut candidate, project).map_err(|e| e.to_string())?;
+    }
+
+    let mut existing_keys = candidate
+        .projects
+        .iter()
+        .find(|entry| entry.name == project)
+        .map(|entry| {
+            entry
+                .secrets
+                .iter()
+                .map(|secret| secret.key.clone())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    for (key, value) in secrets {
+        if existing_keys.contains(key) {
+            update_secret(&mut candidate, project, key, value).map_err(|e| e.to_string())?;
+            updated += 1;
+        } else {
+            add_secret(&mut candidate, project, key, value).map_err(|e| e.to_string())?;
+            existing_keys.insert(key.clone());
+            added += 1;
+        }
+    }
+
+    crate::vault_file::write_vault(&candidate, &password)?;
+    *vault = candidate;
+    Ok((added, updated))
+}
+
 pub fn validate_token(state: &DaemonState, token: &str, pid: u32, uid: u32) -> TokenValidation {
     let token_store = match state.token_store.lock() {
         Ok(store) => store,
@@ -796,6 +920,56 @@ fn consume_action_token(
     Ok(())
 }
 
+fn consume_action_approval(
+    state: &DaemonState,
+    approval_id: &str,
+    peer_uid: u32,
+    peer_pid: u32,
+    scope: ActionScope,
+    project: Option<&str>,
+) -> Result<(), String> {
+    let mut action_approval_store = state
+        .action_approval_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let index = action_approval_store
+        .iter()
+        .position(|(stored_id, _)| constant_time_compare(stored_id, approval_id))
+        .ok_or_else(|| "approval request invalid".to_string())?;
+    let record = action_approval_store[index].1.clone();
+
+    if Instant::now() > record.deadline {
+        action_approval_store.remove(index);
+        return Err("approval request expired".to_string());
+    }
+    if !record.approved {
+        return Err("approval request not approved".to_string());
+    }
+    if record.uid != peer_uid {
+        return Err("approval request uid mismatch".to_string());
+    }
+    if let Some(expected_pid) = record.pid
+        && normalized_peer_pid(peer_pid) != Some(expected_pid)
+    {
+        return Err("approval request pid mismatch".to_string());
+    }
+    if record.scope != scope {
+        return Err("approval request scope mismatch".to_string());
+    }
+    match (&record.project, project) {
+        (Some(expected), Some(actual)) if expected != actual => {
+            return Err("approval request project mismatch".to_string());
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err("approval request project mismatch".to_string());
+        }
+        _ => {}
+    }
+
+    action_approval_store.remove(index);
+    Ok(())
+}
+
 fn normalized_peer_pid(pid: u32) -> Option<u32> {
     if pid == 0 { None } else { Some(pid) }
 }
@@ -889,6 +1063,12 @@ fn invalidate_all_tokens(state: &DaemonState) -> Result<(), String> {
     let mut token_store = state.token_store.lock().map_err(|e| e.to_string())?;
     token_store.clear();
     drop(token_store);
+    let mut action_approval_store = state
+        .action_approval_store
+        .lock()
+        .map_err(|e| e.to_string())?;
+    action_approval_store.clear();
+    drop(action_approval_store);
     let mut action_token_store = state.action_token_store.lock().map_err(|e| e.to_string())?;
     action_token_store.clear();
     Ok(())
@@ -1212,6 +1392,39 @@ fn handle_ipc_request(
             delete_project_from_state(state, project)?;
             json!({ "ok": true })
         }
+        "upsert_secrets_batch" => {
+            let project = request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing project".to_string())?;
+            authorize_action_token(
+                state,
+                request,
+                peer_pid,
+                peer_uid,
+                ActionScope::VaultMutate,
+                Some(project),
+            )?;
+            let secrets = request
+                .get("secrets")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "missing secrets".to_string())?
+                .iter()
+                .map(|entry| {
+                    let key = entry
+                        .get("key")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "batch secret missing key".to_string())?;
+                    let value = entry
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "batch secret missing value".to_string())?;
+                    Ok((key.to_string(), value.to_string()))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let (added, updated) = upsert_secrets_batch_in_state(state, project, &secrets)?;
+            json!({ "ok": true, "added": added, "updated": updated })
+        }
         "project_count" => json!({ "ok": true, "count": project_count(state)? }),
         "status" => {
             let uptime = daemon_uptime(state)?;
@@ -1270,9 +1483,44 @@ fn handle_ipc_request(
                 .ok_or_else(|| "missing scope".to_string())?;
             let scope = ActionScope::parse(scope)?;
             let project = request.get("project").and_then(serde_json::Value::as_str);
+            let approval_id = request
+                .get("approval_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing approval_id".to_string())?;
             let action_token = generate_token();
-            register_action_token(state, &action_token, peer_uid, peer_pid, scope, project)?;
+            register_action_token(
+                state,
+                &action_token,
+                peer_uid,
+                peer_pid,
+                scope,
+                project,
+                approval_id,
+            )?;
             json!({ "ok": true, "action_token": action_token })
+        }
+        "create_action_approval" => {
+            let scope = request
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing scope".to_string())?;
+            let scope = ActionScope::parse(scope)?;
+            let project = request.get("project").and_then(serde_json::Value::as_str);
+            let approval_id = generate_token();
+            create_action_approval(state, &approval_id, peer_uid, peer_pid, scope, project)?;
+            json!({ "ok": true, "approval_id": approval_id })
+        }
+        "approve_action_request" => {
+            let approval_id = request
+                .get("approval_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing approval_id".to_string())?;
+            let approved = request
+                .get("approved")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| "missing approved".to_string())?;
+            resolve_action_approval(state, approval_id, peer_uid, peer_pid, approved)?;
+            json!({ "ok": true })
         }
         "get_all_secrets_for_run" => {
             let token = request
@@ -1504,6 +1752,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
+    fn approved_action_token(
+        state: &DaemonState,
+        peer_pid: u32,
+        peer_uid: u32,
+        scope: &str,
+        project: &str,
+    ) -> String {
+        let approval = handle_ipc_request(
+            state,
+            &json!({
+                "type": "create_action_approval",
+                "scope": scope,
+                "project": project,
+            }),
+            peer_pid,
+            peer_uid,
+        )
+        .unwrap();
+        let approval_id = approval["approval_id"].as_str().unwrap().to_string();
+        let approved = handle_ipc_request(
+            state,
+            &json!({
+                "type": "approve_action_request",
+                "approval_id": approval_id,
+                "approved": true,
+            }),
+            peer_pid,
+            peer_uid,
+        )
+        .unwrap();
+        assert_eq!(approved["ok"], true);
+        let token = handle_ipc_request(
+            state,
+            &json!({
+                "type": "register_action_token",
+                "scope": scope,
+                "project": project,
+                "approval_id": approval_id,
+            }),
+            peer_pid,
+            peer_uid,
+        )
+        .unwrap();
+        token["action_token"].as_str().unwrap().to_string()
+    }
+
     #[test]
     fn test_register_token_phase1_stores_pending_token() {
         let state = sample_daemon_state();
@@ -1560,18 +1854,8 @@ mod tests {
     #[test]
     fn test_sensitive_ipc_rejects_wrong_scope_action_token() {
         let state = sample_daemon_state();
-        let registration = handle_ipc_request(
-            &state,
-            &json!({
-                "type": "register_action_token",
-                "scope": "secret_export",
-                "project": "my-app",
-            }),
-            777,
-            501,
-        )
-        .unwrap();
-        let action_token = registration["action_token"].as_str().unwrap();
+        let action_token =
+            approved_action_token(&state, 777, 501, "secret_export", "my-app");
 
         let error = handle_ipc_request(
             &state,
@@ -1592,18 +1876,7 @@ mod tests {
     #[test]
     fn test_sensitive_ipc_accepts_action_token_once_and_rejects_reuse() {
         let state = sample_daemon_state();
-        let registration = handle_ipc_request(
-            &state,
-            &json!({
-                "type": "register_action_token",
-                "scope": "secret_read",
-                "project": "my-app",
-            }),
-            777,
-            501,
-        )
-        .unwrap();
-        let action_token = registration["action_token"].as_str().unwrap().to_string();
+        let action_token = approved_action_token(&state, 777, 501, "secret_read", "my-app");
 
         consume_action_token(
             &state,
@@ -1625,6 +1898,38 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "action token invalid");
+    }
+
+    #[test]
+    fn test_register_action_token_requires_approved_request() {
+        let state = sample_daemon_state();
+        let approval = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "create_action_approval",
+                "scope": "secret_read",
+                "project": "my-app",
+            }),
+            777,
+            501,
+        )
+        .unwrap();
+        let approval_id = approval["approval_id"].as_str().unwrap();
+
+        let error = handle_ipc_request(
+            &state,
+            &json!({
+                "type": "register_action_token",
+                "scope": "secret_read",
+                "project": "my-app",
+                "approval_id": approval_id,
+            }),
+            777,
+            501,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "approval request not approved");
     }
 
     #[test]
