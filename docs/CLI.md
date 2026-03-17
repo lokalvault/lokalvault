@@ -87,8 +87,7 @@ lokalvault init --template stripe
 - `lokalvault get [project] KEY` — print a secret value
 - `lokalvault copy [project] KEY` — copy a secret to clipboard without printing it
 - `lokalvault import <path> --project <name>` — import dotenv-style secrets
-- `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format
-- `lokalvault export [project] --format dotenv|json|eval` — export a project; only `eval` is meant to be sourced into a shell
+- `lokalvault export [project] --format dotenv|json|eval` — export a project in a safe format; only `eval` is meant to be sourced into a shell
 - `lokalvault diff <path> [--project <name>]` — compare a dotenv file against the vault without printing values
 
 ### Run flows
