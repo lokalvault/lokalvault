@@ -14,6 +14,7 @@ If you're unsure where something goes: check this file first.
 6. `src/audit_log.rs`
 7. `src/settings.rs`
 8. `src-tauri/` and React UI
+9. `src/app_entry.rs`
 
 ## Product Stages
 
@@ -218,6 +219,27 @@ The 1000ms window between Phase 1 and Phase 2 is the solution.
 | `cmd_export` | Export project as dotenv/json/eval |
 | `cmd_import` | Import .env → vault → retire .env |
 | `cmd_push` | Push secrets to Vercel/Render/Railway/Fly/Netlify |
+
+---
+
+## src/app_entry.rs — Shared CLI entry
+### Owns clap parsing and the shared async command dispatcher for both binaries.
+
+- Defines `main_inner()`
+- Keeps presentation-boundary stdout/stderr rendering for CLI commands
+- `src/main.rs` must remain a thin Tokio launcher that calls into this file
+
+---
+
+## src-tauri/src/commands.rs — Tauri command wrappers
+### Read-only desktop wrappers only. No vault logic, no crypto, no secret values.
+
+- `app_status`
+- `list_projects`
+- `list_project_keys`
+
+These wrappers may compose existing backend calls, but they must not become a
+second implementation of vault/business logic.
 | `cmd_status` | Show vault/daemon/session status |
 
 **Current implementation status:**

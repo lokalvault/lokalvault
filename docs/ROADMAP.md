@@ -33,7 +33,7 @@
 - `v0.2.5-ui-contract-final`
 - `v0.2.6-ui-audit-clean`
 
-## Current Milestone - Backend Audit Stabilization
+## Current Milestone - Backend Audit Stabilization + Part 2 Bootstrap
 
 The backend/UI contract remains broadly frozen, but backend stabilization is still active while the audit backlog is burned down. The current work is focused on making the CLI/daemon paths trustworthy before further UI expansion:
 
@@ -42,9 +42,14 @@ The backend/UI contract remains broadly frozen, but backend stabilization is sti
 - Phase 3 - daemon IPC hardening with scoped approval tokens
 - Phase 4 - test reliability and docs drift cleanup
 
+Current bootstrap status:
+- shared CLI entry now unblocks a thin Tauri wrapper from reusing the root crate
+- root-owned Vite workflow now drives the `src-ui/` React app
+- first desktop shell is read-only and only exposes sanitized status/project metadata
+
 Next:
 - finish the audit cleanup and validation pass
-- resume `Part 2` UI work on top of a stable backend/test baseline
+- expand `Part 2` UI flows on top of the stable backend/test baseline
 
 ## Deferred Work
 

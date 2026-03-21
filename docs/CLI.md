@@ -9,6 +9,18 @@ lokalvault init --template openai
 lokalvault run -- python3 app.py
 ```
 
+## Desktop Dev Bootstrap
+
+```bash
+npm ci
+npm run build
+npm run tauri:dev
+```
+
+- Root `package.json` owns the Vite/Tauri frontend workflow
+- React source stays under `src-ui/`
+- The first desktop shell is read-only and only renders session, project, and key-name metadata
+
 ## Project Resolution Order
 
 When a command needs a project, LokalVault resolves it in this order:

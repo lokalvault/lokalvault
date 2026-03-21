@@ -18,12 +18,13 @@ Your code gets its secrets. Your AI agent never does.
 🚧 **This repository is under active development.**
 The POC is complete. Do not use this to store real secrets yet.
 
-Current phase: **Phase 1 (CLI-first)**
+Current phase: **Phase 1 backend hardening + Part 2 bootstrap**
 - [x] Core crypto (AES-256-GCM + Argon2id)
 - [x] Vault file read/write
 - [x] Daemon + Unix socket
 - [x] Process spawn + env injection
 - [x] Peer credential verification for the POC demo path
+- [x] Thin Tauri wrapper + shared CLI entry bootstrap
 
 POC completion demo:
 
@@ -115,25 +116,28 @@ POC result achieved today:
 
 ---
 
-## Running the POC
+## Running The CLI
 
-> Requires: Rust 1.75+, Python 3.8+
+> Requires: Rust toolchain, Node 20+, Python 3.8+
 
 ```bash
-git clone https://github.com/lokalvault/lokalvault-poc
-cd lokalvault-poc
 cargo build
-
-# Run POC test suite
-cargo test
-
-# Run full POC test suite
-cargo test
 
 # Run the completed POC demo
 cargo run -- daemon-poc &
 cargo run -- run -- python3 -c "import os; print(os.environ.get('OPENAI_KEY'))"
 ```
+
+## Running The Desktop Shell
+
+```bash
+npm ci
+npm run build
+npm run tauri:dev
+```
+
+The current desktop shell is intentionally read-only. It proves the Tauri bridge
+and surfaces only sanitized session status, project names, and key names.
 
 ---
 

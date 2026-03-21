@@ -1,0 +1,62 @@
+:root {
+  color-scheme: dark;
+  --ink: #f8fafc;
+  --soft: #d7dde6;
+  --muted: #94a3b8;
+  --accent: #fbbf24;
+  --line: rgba(148, 163, 184, 0.18);
+  --panel: rgba(7, 14, 24, 0.72);
+  --canvas-top: #07101a;
+  --canvas-bottom: #101c2d;
+  --mono: "SFMono-Regular", "IBM Plex Mono", "Cascadia Code", monospace;
+  --sans: "Avenir Next", "Segoe UI", sans-serif;
+  --display: "Iowan Old Style", "Palatino Linotype", serif;
+  font-family: var(--sans);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--soft);
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.12), transparent 28%),
+    radial-gradient(circle at 80% 30%, rgba(245, 158, 11, 0.14), transparent 24%),
+    linear-gradient(180deg, var(--canvas-top), var(--canvas-bottom));
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+h1,
+h2,
+strong {
+  font-family: var(--display);
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
