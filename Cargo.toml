@@ -1,3 +1,6 @@
+[workspace]
+members = ["src-tauri"]
+
 [package]
 name = "lokalvault"
 version = "0.1.0"
@@ -28,3 +31,7 @@ zxcvbn = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[lib]
+name = "lokalvault"
+path = "src/lib.rs"

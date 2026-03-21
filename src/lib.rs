@@ -1,3 +1,5 @@
+mod app_entry;
+
 pub mod audit_log;
 pub mod cli;
 pub mod crypto;
@@ -50,4 +52,12 @@ pub(crate) mod test_utils {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+pub async fn main_inner() {
+    app_entry::main_inner().await;
+}
+
+pub async fn run_cli() {
+    main_inner().await;
 }
