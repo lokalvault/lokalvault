@@ -3,17 +3,28 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-fn wait_for_socket_or_exit(socket: &Path, child: &mut std::process::Child) -> bool {
+/// Why the test stopped waiting for the `daemon-poc` socket.
+///
+/// Anything other than [`SocketWait::Ready`] means the end-to-end path was
+/// never exercised, so the test must fail loudly rather than skip silently.
+#[derive(Debug)]
+enum SocketWait {
+    Ready,
+    DaemonExited(std::process::ExitStatus),
+    TimedOut,
+}
+
+fn wait_for_socket_or_exit(socket: &Path, child: &mut std::process::Child) -> SocketWait {
     for _ in 0..100 {
         if socket.exists() {
-            return true;
+            return SocketWait::Ready;
         }
-        if child.try_wait().unwrap().is_some() {
-            return false;
+        if let Some(status) = child.try_wait().unwrap() {
+            return SocketWait::DaemonExited(status);
         }
         thread::sleep(Duration::from_millis(20));
     }
-    false
+    SocketWait::TimedOut
 }
 
 #[test]
@@ -30,11 +41,24 @@ fn test_poc_demo_command() {
         .spawn()
         .unwrap();
 
-    if !wait_for_socket_or_exit(&socket, &mut daemon) {
+    let wait_result = wait_for_socket_or_exit(&socket, &mut daemon);
+    if !matches!(wait_result, SocketWait::Ready) {
+        // Kill before waiting: on the timeout path the daemon is still alive,
+        // and a bare wait() would block forever.
+        let _ = daemon.kill();
         let _ = daemon.wait();
         let _ = std::fs::remove_file(&socket);
         unsafe { std::env::remove_var("LOKALVAULT_TEST_POC_SOCKET") };
-        return;
+        panic!(
+            "daemon-poc never exposed its socket at {}, so the POC end-to-end \
+             path was never exercised ({})",
+            socket.display(),
+            match wait_result {
+                SocketWait::DaemonExited(status) => format!("daemon exited early with {status}"),
+                SocketWait::TimedOut => "timed out after 2s".to_string(),
+                SocketWait::Ready => unreachable!(),
+            }
+        );
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_lokalvault"))

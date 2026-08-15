@@ -1796,18 +1796,32 @@ mod tests {
             .map_err(|error| error.to_string())?
     }
 
-    fn unix_sockets_available() -> bool {
-        let socket_path = unique_poc_socket_path("daemon-probe");
+    /// Panics unless unix domain sockets are usable in this environment.
+    ///
+    /// Socket-backed daemon tests cannot assert anything without a bindable
+    /// socket. Skipping them silently lets a restricted environment report a
+    /// green suite that never exercised the daemon at all, so failure has to
+    /// be loud.
+    fn require_unix_sockets() {
+        // Tests run in parallel threads within one process, and
+        // `unique_poc_socket_path` is only unique per process. Without a
+        // per-call suffix every prober races on the same path and the losing
+        // thread sees EEXIST.
+        static PROBE_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let probe_id = PROBE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let socket_path = unique_poc_socket_path(&format!("daemon-probe-{probe_id}"));
         let _ = cleanup_socket_file(&socket_path);
-        let result = std::os::unix::net::UnixListener::bind(&socket_path);
-        match result {
+        match std::os::unix::net::UnixListener::bind(&socket_path) {
             Ok(listener) => {
                 drop(listener);
                 let _ = cleanup_socket_file(&socket_path);
-                true
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
-            Err(error) => panic!("failed to probe unix socket support: {error}"),
+            Err(error) => panic!(
+                "unix domain sockets are unavailable at {} ({error}), so this \
+                 daemon socket test cannot verify anything in this environment",
+                socket_path.display()
+            ),
         }
     }
 
@@ -2525,9 +2539,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_get_peer_credentials_returns_current_process_uid() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-peercred");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -2551,9 +2563,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_get_peer_credentials_returns_current_process_uid_on_macos() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-peercred-macos");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -2576,9 +2586,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_socket_sets_permissions_to_0600() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-perms");
         cleanup_socket_file(&socket_path).unwrap();
         let (socket_path, listener) = create_socket_at_path(socket_path).unwrap();
@@ -2592,9 +2600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_returns_hardcoded_json() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-response");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2634,9 +2640,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_client_reported_uid_mismatch() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-bad-uid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2668,9 +2672,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_get_secret_without_uid() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-missing-uid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2701,9 +2703,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_get_secret_without_pid_on_linux() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-missing-pid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2735,9 +2735,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_nonzero_pid_claim_on_linux() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-bad-pid");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2769,9 +2767,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_returns_structured_error_for_unsupported_request_type() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-bad-type");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();
@@ -2801,9 +2797,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_daemon_poc_rejects_unknown_secret_key() {
-        if !unix_sockets_available() {
-            return;
-        }
+        require_unix_sockets();
         let socket_path = unique_poc_socket_path("daemon-bad-key");
         let socket_path_string = socket_path.to_string_lossy().to_string();
         cleanup_socket_file(&socket_path).unwrap();

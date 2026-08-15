@@ -118,11 +118,23 @@ mod tests {
         let server = thread::spawn({
             let socket_path = socket_path.clone();
             move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut request = String::new();
-                let _ = reader.read_line(&mut request);
-                let _ = stream.write_all(b"not-json\n");
+                // `send_ipc_request_to_path` opens a throwaway liveness probe
+                // connection before the real one, so accept until a connection
+                // actually sends a request rather than assuming the first one
+                // is the client's.
+                for _ in 0..8 {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        continue;
+                    };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request = String::new();
+                    let _ = reader.read_line(&mut request);
+                    if request.trim().is_empty() {
+                        continue;
+                    }
+                    let _ = stream.write_all(b"not-json\n");
+                    break;
+                }
                 let _ = std::fs::remove_file(socket_path);
             }
         });
