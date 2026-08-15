@@ -1,6 +1,6 @@
 # LokalVault Codebase Audit
 
-Last updated: 2026-03-17
+Last updated: 2026-08-15
 
 This document tracks the current known issues found during the repo-wide audit.
 It is intended to drive implementation work, not just record findings.
@@ -83,10 +83,15 @@ It is intended to drive implementation work, not just record findings.
 ### P1 — POC smoke test can silently skip when socket binding is unavailable
 
 - `tests/poc_demo.rs`
-- The POC regression test now avoids hanging in restricted environments, but it
-  returns early when the daemon cannot bind its test socket.
+- `src/daemon.rs`
 - Impact: the smoke test can report success without actually exercising the
   `daemon-poc` end-to-end path.
+- Status: `fixed on current branch`
+- The POC smoke test now panics with the specific failure mode (daemon exited
+  early vs timed out) instead of returning early, and the ten socket-backed
+  daemon tests call `require_unix_sockets()`, which panics rather than skipping
+  when a socket cannot be bound. A restricted environment now fails loudly
+  instead of reporting a green suite that asserted nothing.
 - Planned fix phase: `Phase 4`
 
 ### P1 — `lokalvault dev` happy path is incorrect
